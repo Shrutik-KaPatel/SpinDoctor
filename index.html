@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>SpinDoctor — Diagnostics Log</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #161922;
+    --border: #262b36;
+    --text: #e4e7ec;
+    --muted: #8b92a3;
+    --accent: #5eead4;
+    --warn: #f5a623;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    padding: 40px 24px;
+  }
+  .wrap { max-width: 720px; margin: 0 auto; }
+  h1 { font-size: 1.4rem; letter-spacing: 0.02em; margin: 0 0 4px; }
+  .sub { color: var(--muted); font-size: 0.85rem; margin-bottom: 24px; }
+  .status { font-family: ui-monospace, monospace; font-size: 0.8rem; color: var(--muted); margin-bottom: 16px; }
+  button {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 6px 14px;
+    border-radius: 6px;
+    font-size: 0.85rem;
+    cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+  table { width: 100%; border-collapse: collapse; margin-top: 16px; font-size: 0.85rem; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em; }
+  td.fault-healthy { color: var(--accent); }
+  td.fault-imbalance, td.fault-obstruction { color: var(--warn); }
+  tr:first-child td { font-weight: 600; }
+  .empty { color: var(--muted); padding: 24px 0; text-align: center; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>SpinDoctor</h1>
+    <div class="sub">Diagnostics log — pulled live from Google Sheets</div>
+    <div class="status" id="status">loading…</div>
+    <button onclick="load()">Refresh</button>
+    <table id="table" style="display:none">
+      <thead><tr id="head"></tr></thead>
+      <tbody id="body"></tbody>
+    </table>
+    <div class="empty" id="empty" style="display:none">No readings logged yet.</div>
+  </div>
+
+<script>
+const ENDPOINT = 'https://script.google.com/macros/s/AKfycbwybMfmNkcJr13etcb2Gt6GcHDdKg6KT9faJbAHrI92y__-Ti73OX6MKpL_-6UCHf_MVg/exec';
+
+function faultClass(value) {
+  return (value || '').toString().toLowerCase().trim().replace(/\s+/g, '-');
+}
+
+async function load() {
+  const status = document.getElementById('status');
+  status.textContent = 'fetching…';
+  try {
+    const res = await fetch(ENDPOINT);
+    const rows = await res.json();
+
+    if (!rows || rows.length < 2) {
+      document.getElementById('table').style.display = 'none';
+      document.getElementById('empty').style.display = 'block';
+      status.textContent = 'connected, no data rows yet';
+      return;
+    }
+
+    const [header, ...data] = rows;
+    document.getElementById('empty').style.display = 'none';
+
+    document.getElementById('head').innerHTML =
+      header.map(h => `<th>${h}</th>`).join('');
+
+    document.getElementById('body').innerHTML = data.slice().reverse().map(row => {
+      const cells = row.map((cell, i) => {
+        const cls = i === 1 ? `fault-${faultClass(cell)}` : '';
+        return `<td class="${cls}">${cell}</td>`;
+      }).join('');
+      return `<tr>${cells}</tr>`;
+    }).join('');
+
+    document.getElementById('table').style.display = 'table';
+    status.textContent = `connected — ${data.length} reading${data.length === 1 ? '' : 's'}, last updated ${new Date().toLocaleTimeString()}`;
+  } catch (err) {
+    status.textContent = 'fetch failed: ' + err.message;
+  }
+}
+
+load();
+</script>
+</body>
+</html>
