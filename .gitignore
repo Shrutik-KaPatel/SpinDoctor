@@ -1,0 +1,36 @@
+# STM32CubeIDE build artifacts
+firmware/stm32/**/Debug/
+firmware/stm32/**/Release/
+firmware/stm32/**/.metadata/
+firmware/stm32/**/.settings/
+firmware/stm32/**/RTE/
+
+# ESP-IDF build artifacts
+firmware/esp32/**/build/
+firmware/esp32/**/sdkconfig
+firmware/esp32/**/sdkconfig.old
+firmware/esp32/**/managed_components/
+firmware/esp32/**/dependencies.lock
+
+# Secrets, never commit these
+**/secrets.h
+**/credentials.h
+.env
+
+# Apps Script local config (clasp)
+backend/apps-script/.clasp.json
+
+# Dashboard, only relevant if any JS tooling gets added later
+node_modules/
+
+# OS / editor junk
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Python, in case any data scripts use a venv
+__pycache__/
+*.pyc
+.venv/
+venv/
