@@ -39,3 +39,26 @@ working for raw-buffer capture.
 
 No firmware or dataset changes pushed yet. This was an info-gathering
 and mounting-validation session.
+
+### 16:16 - <hash>
+Set up the SpinDoctor_STM32 CubeIDE project for the final capstone
+firmware. Brought in a previously validated LIS3DSHTR SPI driver, hit
+and fixed an include-path issue along the way: a custom subfolder
+only registers as a place the compiler looks for headers, not a place
+the build system compiles .c files from. Library now lives in
+Core/Inc and Core/Src like everything else in the project.
+
+Implemented DMA burst-read of the LIS3DSH triggered by DRDY interrupt,
+applying a burst-read and interrupt-chaining pattern validated in
+earlier hardware bring-up work: one SPI transaction per sample (1
+address byte + 6 data bytes, auto-increment enabled by default on
+this chip), chained across HAL_SPI_TxCpltCallback ->
+HAL_SPI_RxCpltCallback, triggered from HAL_GPIO_EXTI_Callback on PE0.
+Confirmed running at full 400Hz, matching spec for ODR, DMA-driven
+acquisition, and DRDY-triggered timing.
+
+Still open: ping-pong double buffering. Not yet exposed as a bug
+since the only consumer right now (throttled printf) finishes well
+within the 2.5ms sample period, but will matter once FFT or NanoEdge
+inference sits downstream and takes long enough to create real
+contention with the next incoming sample.
