@@ -1,7 +1,5 @@
 # SpinDoctor - Progress Log
 
-Append-only. Entries are never edited after the fact. Corrections get a new entry, not a rewrite.
-
 ## Session 1
 Set up capstone tracking structure in this repo: firmware/, backend/,
 data/, models/, this file. Existing dashboard left untouched.
