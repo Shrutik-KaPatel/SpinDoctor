@@ -31,3 +31,26 @@ path. This is the trigger for the next phase: retrofitting FreeRTOS
 into the project (originally part of the locked architecture, not
 yet implemented), giving DHT11 its own low-priority task so its
 blocking behavior stops affecting time-sensitive sensor handling.
+
+## Session 8
+Replaced blocking HAL_UART_Transmit in _write() with DMA-driven
+HAL_UART_Transmit_DMA, serialized across tasks using a binary
+semaphore (uartTxSemaphore, initialized Available so the first printf
+can proceed immediately without deadlocking). HAL_UART_TxCpltCallback
+releases the semaphore once each transfer completes, preventing a
+second task from starting a new DMA transfer into a buffer still
+being read by a previous one.
+
+Hit a real ordering bug on first flash: _write() was calling
+osSemaphoreWait before the FreeRTOS scheduler had started, since
+the early debug prints in USER CODE BEGIN 2 ran before osKernelStart.
+Semaphore waits are scheduler-dependent and hang silently when called
+pre-kernel, which starved WatchdogTask and triggered repeated IWDG
+resets. Fixed by removing the pre-kernel debug printf calls that were
+leftover from earlier diagnostic work, which was the right cleanup
+anyway. DWT cycle counter enable lines kept since DHT11 depends on
+DWT->CYCCNT for bit-timing.
+
+DHT11 noted as collecting both temperature and humidity but only
+temperature will appear in the eventual ESP32 payload. Humidity
+fields retained in the diagnostics struct but not transmitted.
