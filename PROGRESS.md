@@ -159,3 +159,27 @@ Survived an accidental CubeMX "Reset Configuration" click mid-session
 with no lost work, caught before generating code or saving, recovered
 by discarding the in-memory reset and reopening the already-saved
 .ioc file.
+
+## Session 7
+Added a shared DiagnosticsData struct and a FreeRTOS mutex
+(diagnosticsMutex) protecting it, the piece from the original locked
+architecture meant to give the two sensor tasks a single, safe place
+to publish their latest readings for a future consumer (the
+UART/ESP32 handoff task) to read as one consistent snapshot. AccelTask
+and DHT11Task now lock, write their respective fields, and unlock
+immediately, holding the mutex only for the few microseconds it takes
+to copy a handful of values, never across something slow like printf,
+which would needlessly block the other task.
+
+Hit a real C gotcha while wiring this up: the struct definition was
+initially placed in main.h's top Header comment block, which sits
+above the file's #ifndef include guard. Since that section isn't
+protected by the guard, any file including main.h more than once
+indirectly (DHT11.h also includes main.h) got the struct defined
+twice in the same compile, a "conflicting types" error. Fixed by
+moving the struct into the guarded USER CODE BEGIN Includes section
+instead, where it belongs.
+
+No behavioral change yet, this is purely the safe-sharing
+infrastructure landing correctly before anything actually consumes
+the shared struct.
