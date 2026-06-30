@@ -41,6 +41,9 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
+ADC_HandleTypeDef hadc1;
+DMA_HandleTypeDef hdma_adc1;
+
 SPI_HandleTypeDef hspi1;
 DMA_HandleTypeDef hdma_spi1_rx;
 DMA_HandleTypeDef hdma_spi1_tx;
@@ -50,6 +53,11 @@ UART_HandleTypeDef huart2;
 /* USER CODE BEGIN PV */
 LIS3_HandleTypeDef hlis;
 LIS3_DataTypeDef   data;
+
+/* Single-element circular DMA buffer for ADC1 temperature reads.
+ * volatile because DMA writes it from hardware, not CPU code.
+ * uint16_t because ADC is 12-bit (max 4095), needs 16-bit storage. */
+volatile uint16_t adc_temp_raw;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -58,6 +66,7 @@ static void MX_GPIO_Init(void);
 static void MX_DMA_Init(void);
 static void MX_SPI1_Init(void);
 static void MX_USART2_UART_Init(void);
+static void MX_ADC1_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -99,6 +108,7 @@ int main(void)
   MX_DMA_Init();
   MX_SPI1_Init();
   MX_USART2_UART_Init();
+  MX_ADC1_Init();
   /* USER CODE BEGIN 2 */
   hlis.hspi    = &hspi1;
     hlis.cs_port = GPIOE;
@@ -108,6 +118,16 @@ int main(void)
     LIS3_WriteReg(&hlis, LIS3_CTRL_REG3, LIS3_CTRL_REG3_DRDY_INT1);   /* NEW: routes DRDY to INT1/PE0, without
                                                                         this the chip never pulses PE0 and
                                                                         no EXTI interrupt ever fires */
+
+    /* Start ADC1 in DMA circular mode. From this point the DMA keeps
+     * adc_temp_raw updated automatically on every completed conversion,
+     * no further software trigger needed. HAL_ADC_Start_DMA takes the
+     * buffer pointer and length (1 element here, one channel only). */
+    HAL_ADC_Start_DMA(&hadc1, (uint32_t*)&adc_temp_raw, 1);
+
+    printf("CAL1=%u CAL2=%u\r\n",
+           *((uint16_t*)0x1FFF7A2C),
+           *((uint16_t*)0x1FFF7A2E));
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -126,6 +146,18 @@ int main(void)
 	      {
 	          print_counter = 0;
 	          printf("X:%d Y:%d Z:%d\r\n", data.x, data.y, data.z);
+
+	          /* Convert raw ADC count to degrees Celsius using factory
+	              * calibration values burned into fixed flash addresses at
+	              * production. TS_CAL1 is raw ADC at 30C, TS_CAL2 at 110C,
+	              * both at VDDA=3.3V. Linear interpolation between the two
+	              * known points gives actual temperature. */
+	             uint16_t cal1 = *((uint16_t*)0x1FFF7A2C);
+	             uint16_t cal2 = *((uint16_t*)0x1FFF7A2E);
+	             float temp_c  = ((float)(adc_temp_raw - cal1) * (110.0f - 30.0f)
+	                             / (float)(cal2 - cal1)) + 30.0f;
+	             printf("Temp: %.1f C\r\n", temp_c);
+	             printf("ADC=%u\r\n", adc_temp_raw);
 	      }
 	  }
     /* USER CODE END WHILE */
@@ -180,6 +212,58 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
+}
+
+/**
+  * @brief ADC1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_ADC1_Init(void)
+{
+
+  /* USER CODE BEGIN ADC1_Init 0 */
+
+  /* USER CODE END ADC1_Init 0 */
+
+  ADC_ChannelConfTypeDef sConfig = {0};
+
+  /* USER CODE BEGIN ADC1_Init 1 */
+
+  /* USER CODE END ADC1_Init 1 */
+
+  /** Configure the global features of the ADC (Clock, Resolution, Data Alignment and number of conversion)
+  */
+  hadc1.Instance = ADC1;
+  hadc1.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV4;
+  hadc1.Init.Resolution = ADC_RESOLUTION_12B;
+  hadc1.Init.ScanConvMode = DISABLE;
+  hadc1.Init.ContinuousConvMode = ENABLE;
+  hadc1.Init.DiscontinuousConvMode = DISABLE;
+  hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
+  hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
+  hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
+  hadc1.Init.NbrOfConversion = 1;
+  hadc1.Init.DMAContinuousRequests = ENABLE;
+  hadc1.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
+  if (HAL_ADC_Init(&hadc1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
+  */
+  sConfig.Channel = ADC_CHANNEL_TEMPSENSOR;
+  sConfig.Rank = 1;
+  sConfig.SamplingTime = ADC_SAMPLETIME_480CYCLES;
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN ADC1_Init 2 */
+
+  /* USER CODE END ADC1_Init 2 */
+
 }
 
 /**
@@ -269,6 +353,9 @@ static void MX_DMA_Init(void)
   /* DMA2_Stream3_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA2_Stream3_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(DMA2_Stream3_IRQn);
+  /* DMA2_Stream4_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA2_Stream4_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA2_Stream4_IRQn);
 
 }
 
