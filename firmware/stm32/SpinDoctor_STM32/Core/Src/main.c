@@ -53,11 +53,13 @@ DMA_HandleTypeDef hdma_spi1_rx;
 DMA_HandleTypeDef hdma_spi1_tx;
 
 UART_HandleTypeDef huart2;
+DMA_HandleTypeDef hdma_usart2_tx;
 
 osThreadId AccelTaskHandle;
 osThreadId DHT11TaskHandle;
 osThreadId WatchdogTaskHandle;
 osMutexId diagnosticsMutexHandle;
+osSemaphoreId uartTxSemaphoreHandle;
 /* USER CODE BEGIN PV */
 LIS3_HandleTypeDef hlis;
 LIS3_DataTypeDef   data;
@@ -148,21 +150,6 @@ int main(void)
      * buffer pointer and length (1 element here, one channel only). */
     HAL_ADC_Start_DMA(&hadc1, (uint32_t*)&adc_temp_raw, 1);
 
-    printf("CAL1=%u CAL2=%u\r\n",
-           *((uint16_t*)0x1FFF7A2C),
-           *((uint16_t*)0x1FFF7A2E));
-
-    /* Enable the cycle counter once at startup. DEM_CR bit24 unlocks
-     * access to the DWT block, DWT_CTRL bit0 starts the counter itself. */
-    DEM_CR |= (1 << 24);
-    DWT_CYCCNT = 0;
-    DWT_CTRL |= 1;
-
-    uint32_t t0 = DWT_CYCCNT;
-    HAL_Delay(1);  /* should take roughly 168000 cycles at 168MHz */
-    uint32_t t1 = DWT_CYCCNT;
-    printf("DWT delta over 1ms HAL_Delay: %lu\r\n", (unsigned long)(t1 - t0));
-
   /* USER CODE END 2 */
 
   /* Create the mutex(es) */
@@ -173,6 +160,11 @@ int main(void)
   /* USER CODE BEGIN RTOS_MUTEX */
   /* add mutexes, ... */
   /* USER CODE END RTOS_MUTEX */
+
+  /* Create the semaphores(s) */
+  /* definition and creation of uartTxSemaphore */
+  osSemaphoreDef(uartTxSemaphore);
+  uartTxSemaphoreHandle = osSemaphoreCreate(osSemaphore(uartTxSemaphore), 1);
 
   /* USER CODE BEGIN RTOS_SEMAPHORES */
   /* add semaphores, ... */
@@ -453,8 +445,12 @@ static void MX_DMA_Init(void)
 
   /* DMA controller clock enable */
   __HAL_RCC_DMA2_CLK_ENABLE();
+  __HAL_RCC_DMA1_CLK_ENABLE();
 
   /* DMA interrupt init */
+  /* DMA1_Stream6_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Stream6_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Stream6_IRQn);
   /* DMA2_Stream0_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA2_Stream0_IRQn, 5, 0);
   HAL_NVIC_EnableIRQ(DMA2_Stream0_IRQn);
@@ -521,10 +517,31 @@ static void MX_GPIO_Init(void)
 
 /* USER CODE BEGIN 4 */
 int _write(int file, char *ptr, int len)
-  {
-      HAL_UART_Transmit(&huart2, (uint8_t*)ptr, len, HAL_MAX_DELAY);
-      return len;
-  }
+{
+    /* Wait until any previous DMA transfer has actually finished,
+     * osWaitForever is fine here since transfers complete in well
+     * under a millisecond, this is never a meaningful stall. Without
+     * this wait, two tasks calling printf close together could start
+     * a second DMA transfer from a different buffer while the first
+     * one is still mid-flight, corrupting output. */
+    osSemaphoreWait(uartTxSemaphoreHandle, osWaitForever);
+
+    HAL_UART_Transmit_DMA(&huart2, (uint8_t*)ptr, len);
+
+    return len;
+}
+
+/* HAL calls this automatically once a UART DMA transmit completes.
+ * Releasing the semaphore here, not inside _write() itself, is what
+ * makes this safe across tasks, the next printf can't start a new
+ * transfer until the hardware confirms the previous one is done. */
+void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
+{
+    if (huart->Instance == USART2)
+    {
+        osSemaphoreRelease(uartTxSemaphoreHandle);
+    }
+}
 
 /* Fires on every DRDY rising edge from the LIS3DSH, i.e. every new
  * sample at 400Hz. Kicks off the DMA burst read; the rest of the
