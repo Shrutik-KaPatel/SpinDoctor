@@ -139,3 +139,23 @@ and confirmed it booted cleanly with existing code still running
 before moving any sensor logic into a task, then moved both sensors
 into one task to confirm correctness, then split into two tasks last.
 Each stage verified independently before adding the next.
+
+## Session 6
+Added IWDG (Independent Watchdog) as a system-level safety net. Used
+LSI-clock-based timing (prescaler 32, reload 1999) for a roughly
+2-second timeout window, independent from the main system clock by
+design, since a watchdog that shares a clock with the thing it's
+protecting against can fail right alongside it. Implemented as its
+own dedicated low-priority FreeRTOS task that refreshes the watchdog
+every 500ms, kept deliberately separate from AccelTask or DHT11Task
+so the check reflects overall scheduler health, not just one specific
+task staying alive. Scope is intentionally system-level hang
+detection (a fully stuck scheduler or task forces a reset), not
+per-task liveness monitoring, which would need each task reporting
+its own health into shared state, more complexity than this project
+needs right now.
+
+Survived an accidental CubeMX "Reset Configuration" click mid-session
+with no lost work, caught before generating code or saving, recovered
+by discarding the in-memory reset and reopening the already-saved
+.ioc file.
