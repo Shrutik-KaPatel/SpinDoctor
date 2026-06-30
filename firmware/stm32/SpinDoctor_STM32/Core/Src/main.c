@@ -18,6 +18,7 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "cmsis_os.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -51,6 +52,8 @@ DMA_HandleTypeDef hdma_spi1_tx;
 
 UART_HandleTypeDef huart2;
 
+osThreadId AccelTaskHandle;
+osThreadId DHT11TaskHandle;
 /* USER CODE BEGIN PV */
 LIS3_HandleTypeDef hlis;
 LIS3_DataTypeDef   data;
@@ -75,6 +78,9 @@ static void MX_DMA_Init(void);
 static void MX_SPI1_Init(void);
 static void MX_USART2_UART_Init(void);
 static void MX_ADC1_Init(void);
+void StartAccelTask(void const * argument);
+void StartDHT11Task(void const * argument);
+
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -149,6 +155,40 @@ int main(void)
     printf("DWT delta over 1ms HAL_Delay: %lu\r\n", (unsigned long)(t1 - t0));
 
   /* USER CODE END 2 */
+
+  /* USER CODE BEGIN RTOS_MUTEX */
+  /* add mutexes, ... */
+  /* USER CODE END RTOS_MUTEX */
+
+  /* USER CODE BEGIN RTOS_SEMAPHORES */
+  /* add semaphores, ... */
+  /* USER CODE END RTOS_SEMAPHORES */
+
+  /* USER CODE BEGIN RTOS_TIMERS */
+  /* start timers, add new ones, ... */
+  /* USER CODE END RTOS_TIMERS */
+
+  /* USER CODE BEGIN RTOS_QUEUES */
+  /* add queues, ... */
+  /* USER CODE END RTOS_QUEUES */
+
+  /* Create the thread(s) */
+  /* definition and creation of AccelTask */
+  osThreadDef(AccelTask, StartAccelTask, osPriorityNormal, 0, 128);
+  AccelTaskHandle = osThreadCreate(osThread(AccelTask), NULL);
+
+  /* definition and creation of DHT11Task */
+  osThreadDef(DHT11Task, StartDHT11Task, osPriorityLow, 0, 128);
+  DHT11TaskHandle = osThreadCreate(osThread(DHT11Task), NULL);
+
+  /* USER CODE BEGIN RTOS_THREADS */
+  /* add threads, ... */
+  /* USER CODE END RTOS_THREADS */
+
+  /* Start scheduler */
+  osKernelStart();
+
+  /* We should never get here as control is now taken by the scheduler */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
@@ -369,13 +409,13 @@ static void MX_DMA_Init(void)
 
   /* DMA interrupt init */
   /* DMA2_Stream0_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA2_Stream0_IRQn, 0, 0);
+  HAL_NVIC_SetPriority(DMA2_Stream0_IRQn, 5, 0);
   HAL_NVIC_EnableIRQ(DMA2_Stream0_IRQn);
   /* DMA2_Stream3_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA2_Stream3_IRQn, 0, 0);
+  HAL_NVIC_SetPriority(DMA2_Stream3_IRQn, 5, 0);
   HAL_NVIC_EnableIRQ(DMA2_Stream3_IRQn);
   /* DMA2_Stream4_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA2_Stream4_IRQn, 0, 0);
+  HAL_NVIC_SetPriority(DMA2_Stream4_IRQn, 5, 0);
   HAL_NVIC_EnableIRQ(DMA2_Stream4_IRQn);
 
 }
@@ -424,7 +464,7 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
 
   /* EXTI interrupt init*/
-  HAL_NVIC_SetPriority(EXTI0_IRQn, 0, 0);
+  HAL_NVIC_SetPriority(EXTI0_IRQn, 5, 0);
   HAL_NVIC_EnableIRQ(EXTI0_IRQn);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
@@ -479,6 +519,92 @@ void delay_us(uint32_t us)
 }
 
 /* USER CODE END 4 */
+
+/* USER CODE BEGIN Header_StartAccelTask */
+/**
+  * @brief  Function implementing the AccelTask thread.
+  * @param  argument: Not used
+  * @retval None
+  */
+/* USER CODE END Header_StartAccelTask */
+void StartAccelTask(void const * argument)
+{
+  /* USER CODE BEGIN 5 */
+  /* Infinite loop */
+  for(;;)
+  {
+	  /* Nothing blocking here anymore. DRDY interrupt -> DMA burst read
+	    * runs entirely on its own; this loop just checks the flag the
+	    * library sets once a fresh sample has actually landed. */
+	 	  if (LIS3_DataReady)
+	 	  {
+	 	      LIS3_DataReady = 0;
+
+	 	      static uint16_t print_counter = 0;
+	 	      if (++print_counter >= 40)   /* ~10 prints/sec at 400Hz ODR, readable */
+	 	      {
+	 	          print_counter = 0;
+	 	          printf("X:%d Y:%d Z:%d\r\n", data.x, data.y, data.z);
+	 	      }
+	 	  }
+    osDelay(1);
+  }
+  /* USER CODE END 5 */
+}
+
+/* USER CODE BEGIN Header_StartDHT11Task */
+/**
+* @brief Function implementing the DHT11Task thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartDHT11Task */
+void StartDHT11Task(void const * argument)
+{
+  /* USER CODE BEGIN StartDHT11Task */
+  /* Infinite loop */
+  for(;;)
+  {
+	  DHT11_Data dht;
+	      if (DHT11_Read(&dht))
+	      {
+	          printf("DHT11: %d.%d%% RH, %d.%dC\r\n",
+	                 dht.humidity_int, dht.humidity_dec,
+	                 dht.temp_int, dht.temp_dec);
+	      }
+	      else
+	      {
+	          printf("DHT11: read failed\r\n");
+	      }
+
+	      osDelay(3000);  /* temperature has no urgency, 3s between reads is plenty,
+	                        * and gives the bus a clean recovery window between
+	                        * 1-wire transactions */
+  }
+  /* USER CODE END StartDHT11Task */
+}
+
+/**
+  * @brief  Period elapsed callback in non blocking mode
+  * @note   This function is called  when TIM6 interrupt took place, inside
+  * HAL_TIM_IRQHandler(). It makes a direct call to HAL_IncTick() to increment
+  * a global variable "uwTick" used as application time base.
+  * @param  htim : TIM handle
+  * @retval None
+  */
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+  /* USER CODE BEGIN Callback 0 */
+
+  /* USER CODE END Callback 0 */
+  if (htim->Instance == TIM6)
+  {
+    HAL_IncTick();
+  }
+  /* USER CODE BEGIN Callback 1 */
+
+  /* USER CODE END Callback 1 */
+}
 
 /**
   * @brief  This function is executed in case of error occurrence.
