@@ -16,6 +16,12 @@
   *
   ******************************************************************************
   */
+
+/* Shared diagnostics struct, written by AccelTask and DHT11Task,
+ * eventually read by a future UART/ESP32-handoff task. Protected by
+ * diagnosticsMutex, any code touching this struct must hold that
+ * mutex first, no exceptions, that's the whole point of having it. */
+
 /* USER CODE END Header */
 
 /* Define to prevent recursive inclusion -------------------------------------*/
@@ -31,7 +37,23 @@ extern "C" {
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include <stdint.h>
 
+/* Shared diagnostics struct, written by AccelTask and DHT11Task,
+ * eventually read by a future UART/ESP32-handoff task. Protected by
+ * diagnosticsMutex, any code touching this struct must hold that
+ * mutex first, no exceptions, that's the whole point of having it. */
+typedef struct {
+    int16_t accel_x;
+    int16_t accel_y;
+    int16_t accel_z;
+    uint8_t humidity_int;
+    uint8_t humidity_dec;
+    uint8_t temp_int;
+    uint8_t temp_dec;
+} DiagnosticsData;
+
+extern DiagnosticsData diagnostics;
 /* USER CODE END Includes */
 
 /* Exported types ------------------------------------------------------------*/
