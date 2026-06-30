@@ -18,11 +18,13 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "cmsis_os.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include <stdio.h>
 #include <LIS3DSHTR.h>
+#include "DHT11.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -50,6 +52,8 @@ DMA_HandleTypeDef hdma_spi1_tx;
 
 UART_HandleTypeDef huart2;
 
+osThreadId AccelTaskHandle;
+osThreadId DHT11TaskHandle;
 /* USER CODE BEGIN PV */
 LIS3_HandleTypeDef hlis;
 LIS3_DataTypeDef   data;
@@ -58,6 +62,13 @@ LIS3_DataTypeDef   data;
  * volatile because DMA writes it from hardware, not CPU code.
  * uint16_t because ADC is 12-bit (max 4095), needs 16-bit storage. */
 volatile uint16_t adc_temp_raw;
+
+/* DWT cycle counter, used for precise microsecond delays needed by
+ * the 1-Wire protocol. Cortex-M4 core feature, not a normal STM32
+ * peripheral, has nothing to do with HAL and needs no CubeMX setup. */
+#define DWT_CYCCNT  (*(volatile uint32_t*)0xE0001004)
+#define DWT_CTRL    (*(volatile uint32_t*)0xE0001000)
+#define DEM_CR      (*(volatile uint32_t*)0xE000EDFC)
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -67,6 +78,9 @@ static void MX_DMA_Init(void);
 static void MX_SPI1_Init(void);
 static void MX_USART2_UART_Init(void);
 static void MX_ADC1_Init(void);
+void StartAccelTask(void const * argument);
+void StartDHT11Task(void const * argument);
+
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -128,7 +142,53 @@ int main(void)
     printf("CAL1=%u CAL2=%u\r\n",
            *((uint16_t*)0x1FFF7A2C),
            *((uint16_t*)0x1FFF7A2E));
+
+    /* Enable the cycle counter once at startup. DEM_CR bit24 unlocks
+     * access to the DWT block, DWT_CTRL bit0 starts the counter itself. */
+    DEM_CR |= (1 << 24);
+    DWT_CYCCNT = 0;
+    DWT_CTRL |= 1;
+
+    uint32_t t0 = DWT_CYCCNT;
+    HAL_Delay(1);  /* should take roughly 168000 cycles at 168MHz */
+    uint32_t t1 = DWT_CYCCNT;
+    printf("DWT delta over 1ms HAL_Delay: %lu\r\n", (unsigned long)(t1 - t0));
+
   /* USER CODE END 2 */
+
+  /* USER CODE BEGIN RTOS_MUTEX */
+  /* add mutexes, ... */
+  /* USER CODE END RTOS_MUTEX */
+
+  /* USER CODE BEGIN RTOS_SEMAPHORES */
+  /* add semaphores, ... */
+  /* USER CODE END RTOS_SEMAPHORES */
+
+  /* USER CODE BEGIN RTOS_TIMERS */
+  /* start timers, add new ones, ... */
+  /* USER CODE END RTOS_TIMERS */
+
+  /* USER CODE BEGIN RTOS_QUEUES */
+  /* add queues, ... */
+  /* USER CODE END RTOS_QUEUES */
+
+  /* Create the thread(s) */
+  /* definition and creation of AccelTask */
+  osThreadDef(AccelTask, StartAccelTask, osPriorityNormal, 0, 128);
+  AccelTaskHandle = osThreadCreate(osThread(AccelTask), NULL);
+
+  /* definition and creation of DHT11Task */
+  osThreadDef(DHT11Task, StartDHT11Task, osPriorityLow, 0, 128);
+  DHT11TaskHandle = osThreadCreate(osThread(DHT11Task), NULL);
+
+  /* USER CODE BEGIN RTOS_THREADS */
+  /* add threads, ... */
+  /* USER CODE END RTOS_THREADS */
+
+  /* Start scheduler */
+  osKernelStart();
+
+  /* We should never get here as control is now taken by the scheduler */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
@@ -147,17 +207,18 @@ int main(void)
 	          print_counter = 0;
 	          printf("X:%d Y:%d Z:%d\r\n", data.x, data.y, data.z);
 
-	          /* Convert raw ADC count to degrees Celsius using factory
-	              * calibration values burned into fixed flash addresses at
-	              * production. TS_CAL1 is raw ADC at 30C, TS_CAL2 at 110C,
-	              * both at VDDA=3.3V. Linear interpolation between the two
-	              * known points gives actual temperature. */
-	             uint16_t cal1 = *((uint16_t*)0x1FFF7A2C);
-	             uint16_t cal2 = *((uint16_t*)0x1FFF7A2E);
-	             float temp_c  = ((float)(adc_temp_raw - cal1) * (110.0f - 30.0f)
-	                             / (float)(cal2 - cal1)) + 30.0f;
-	             printf("Temp: %.1f C\r\n", temp_c);
-	             printf("ADC=%u\r\n", adc_temp_raw);
+	          DHT11_Data dht;
+	          if (DHT11_Read(&dht))
+	          {
+	              printf("DHT11: %d.%d%% RH, %d.%dC\r\n",
+	                     dht.humidity_int, dht.humidity_dec,
+	                     dht.temp_int, dht.temp_dec);
+	          }
+	          else
+	          {
+	              printf("DHT11: read failed\r\n");
+	          }
+
 	      }
 	  }
     /* USER CODE END WHILE */
@@ -348,13 +409,13 @@ static void MX_DMA_Init(void)
 
   /* DMA interrupt init */
   /* DMA2_Stream0_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA2_Stream0_IRQn, 0, 0);
+  HAL_NVIC_SetPriority(DMA2_Stream0_IRQn, 5, 0);
   HAL_NVIC_EnableIRQ(DMA2_Stream0_IRQn);
   /* DMA2_Stream3_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA2_Stream3_IRQn, 0, 0);
+  HAL_NVIC_SetPriority(DMA2_Stream3_IRQn, 5, 0);
   HAL_NVIC_EnableIRQ(DMA2_Stream3_IRQn);
   /* DMA2_Stream4_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA2_Stream4_IRQn, 0, 0);
+  HAL_NVIC_SetPriority(DMA2_Stream4_IRQn, 5, 0);
   HAL_NVIC_EnableIRQ(DMA2_Stream4_IRQn);
 
 }
@@ -374,9 +435,13 @@ static void MX_GPIO_Init(void)
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOE_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
+  __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(LIS3DSH_CS_GPIO_Port, LIS3DSH_CS_Pin, GPIO_PIN_SET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(DHT11_DATA_GPIO_Port, DHT11_DATA_Pin, GPIO_PIN_SET);
 
   /*Configure GPIO pin : LIS3DSH_CS_Pin */
   GPIO_InitStruct.Pin = LIS3DSH_CS_Pin;
@@ -385,6 +450,13 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(LIS3DSH_CS_GPIO_Port, &GPIO_InitStruct);
 
+  /*Configure GPIO pin : DHT11_DATA_Pin */
+  GPIO_InitStruct.Pin = DHT11_DATA_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_OD;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(DHT11_DATA_GPIO_Port, &GPIO_InitStruct);
+
   /*Configure GPIO pin : PE0 */
   GPIO_InitStruct.Pin = GPIO_PIN_0;
   GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
@@ -392,7 +464,7 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
 
   /* EXTI interrupt init*/
-  HAL_NVIC_SetPriority(EXTI0_IRQn, 0, 0);
+  HAL_NVIC_SetPriority(EXTI0_IRQn, 5, 0);
   HAL_NVIC_EnableIRQ(EXTI0_IRQn);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
@@ -434,7 +506,105 @@ void HAL_SPI_RxCpltCallback(SPI_HandleTypeDef *hspi)
 {
     LIS3_DMA_RxCpltHandler();
 }
+
+/* Busy-wait for a precise number of microseconds, using the DWT cycle
+ * counter. SystemCoreClock is 168000000 (168MHz) in this project, so
+ * cycles-per-microsecond = 168. Unsigned subtraction handles the
+ * counter wrapping the same way the timer capture did earlier. */
+void delay_us(uint32_t us)
+{
+    uint32_t start = DWT_CYCCNT;
+    uint32_t cycles = us * (SystemCoreClock / 1000000);
+    while ((DWT_CYCCNT - start) < cycles) { }
+}
+
 /* USER CODE END 4 */
+
+/* USER CODE BEGIN Header_StartAccelTask */
+/**
+  * @brief  Function implementing the AccelTask thread.
+  * @param  argument: Not used
+  * @retval None
+  */
+/* USER CODE END Header_StartAccelTask */
+void StartAccelTask(void const * argument)
+{
+  /* USER CODE BEGIN 5 */
+  /* Infinite loop */
+  for(;;)
+  {
+	  /* Nothing blocking here anymore. DRDY interrupt -> DMA burst read
+	    * runs entirely on its own; this loop just checks the flag the
+	    * library sets once a fresh sample has actually landed. */
+	 	  if (LIS3_DataReady)
+	 	  {
+	 	      LIS3_DataReady = 0;
+
+	 	      static uint16_t print_counter = 0;
+	 	      if (++print_counter >= 40)   /* ~10 prints/sec at 400Hz ODR, readable */
+	 	      {
+	 	          print_counter = 0;
+	 	          printf("X:%d Y:%d Z:%d\r\n", data.x, data.y, data.z);
+	 	      }
+	 	  }
+    osDelay(1);
+  }
+  /* USER CODE END 5 */
+}
+
+/* USER CODE BEGIN Header_StartDHT11Task */
+/**
+* @brief Function implementing the DHT11Task thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartDHT11Task */
+void StartDHT11Task(void const * argument)
+{
+  /* USER CODE BEGIN StartDHT11Task */
+  /* Infinite loop */
+  for(;;)
+  {
+	  DHT11_Data dht;
+	      if (DHT11_Read(&dht))
+	      {
+	          printf("DHT11: %d.%d%% RH, %d.%dC\r\n",
+	                 dht.humidity_int, dht.humidity_dec,
+	                 dht.temp_int, dht.temp_dec);
+	      }
+	      else
+	      {
+	          printf("DHT11: read failed\r\n");
+	      }
+
+	      osDelay(3000);  /* temperature has no urgency, 3s between reads is plenty,
+	                        * and gives the bus a clean recovery window between
+	                        * 1-wire transactions */
+  }
+  /* USER CODE END StartDHT11Task */
+}
+
+/**
+  * @brief  Period elapsed callback in non blocking mode
+  * @note   This function is called  when TIM6 interrupt took place, inside
+  * HAL_TIM_IRQHandler(). It makes a direct call to HAL_IncTick() to increment
+  * a global variable "uwTick" used as application time base.
+  * @param  htim : TIM handle
+  * @retval None
+  */
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+  /* USER CODE BEGIN Callback 0 */
+
+  /* USER CODE END Callback 0 */
+  if (htim->Instance == TIM6)
+  {
+    HAL_IncTick();
+  }
+  /* USER CODE BEGIN Callback 1 */
+
+  /* USER CODE END Callback 1 */
+}
 
 /**
   * @brief  This function is executed in case of error occurrence.

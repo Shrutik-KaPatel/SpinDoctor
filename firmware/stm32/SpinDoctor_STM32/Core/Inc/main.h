@@ -59,6 +59,8 @@ void Error_Handler(void);
 /* Private defines -----------------------------------------------------------*/
 #define LIS3DSH_CS_Pin GPIO_PIN_3
 #define LIS3DSH_CS_GPIO_Port GPIOE
+#define DHT11_DATA_Pin GPIO_PIN_6
+#define DHT11_DATA_GPIO_Port GPIOB
 
 /* USER CODE BEGIN Private defines */
 

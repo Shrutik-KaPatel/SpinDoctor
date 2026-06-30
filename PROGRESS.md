@@ -139,4 +139,3 @@ and confirmed it booted cleanly with existing code still running
 before moving any sensor logic into a task, then moved both sensors
 into one task to confirm correctness, then split into two tasks last.
 Each stage verified independently before adding the next.
-
