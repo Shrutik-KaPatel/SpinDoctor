@@ -87,3 +87,47 @@ of the integrated firmware going forward.
 Updated sensor scope: accelerometer (primary) + internal die
 temperature (secondary context). Moving to full sensor-fusion
 integration next.
+
+## Session 5
+Retrofitted FreeRTOS into the project, originally part of the locked
+architecture but deferred during initial sensor bring-up. Set the HAL
+timebase source to TIM6 instead of SysTick before generating, since
+FreeRTOS and HAL both want ownership of SysTick by default, a known
+conflict that needs resolving before kernel generation, not after.
+
+Split sensor handling into two priority-separated tasks, directly
+motivated by the blocking issue found in the previous session:
+AccelTask (higher priority) handles the DRDY-interrupt-driven
+accelerometer flag check, completely non-blocking. DHT11Task (lower
+priority) owns the slow, blocking DHT11 read on its own 3-second
+cycle. Confirmed working: accelerometer output streams continuously
+and unaffected while DHT11 reads happen in the background, exactly
+the behavior a single shared loop couldn't provide.
+
+Migrated incrementally and safely: enabled the FreeRTOS kernel first
+and confirmed it booted cleanly with existing code still running
+before moving any sensor logic into a task, then moved both sensors
+into one task to confirm correctness, then split into two tasks last.
+Each stage verified independently before adding the next.
+
+## Session 5
+Retrofitted FreeRTOS into the project, originally part of the locked
+architecture but deferred during initial sensor bring-up. Set the HAL
+timebase source to TIM6 instead of SysTick before generating, since
+FreeRTOS and HAL both want ownership of SysTick by default, a known
+conflict that needs resolving before kernel generation, not after.
+
+Split sensor handling into two priority-separated tasks, directly
+motivated by the blocking issue found in the previous session:
+AccelTask (higher priority) handles the DRDY-interrupt-driven
+accelerometer flag check, completely non-blocking. DHT11Task (lower
+priority) owns the slow, blocking DHT11 read on its own 3-second
+cycle. Confirmed working: accelerometer output streams continuously
+and unaffected while DHT11 reads happen in the background, exactly
+the behavior a single shared loop couldn't provide.
+
+Migrated incrementally and safely: enabled the FreeRTOS kernel first
+and confirmed it booted cleanly with existing code still running
+before moving any sensor logic into a task, then moved both sensors
+into one task to confirm correctness, then split into two tasks last.
+Each stage verified independently before adding the next.
