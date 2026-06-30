@@ -2,9 +2,7 @@
 
 Append-only. Entries are never edited after the fact. Corrections get a new entry, not a rewrite.
 
-## Day 1 - 2026-06-29
-
-### 06:10
+## session 1
 Set up capstone tracking structure in this repo: firmware/, backend/,
 data/, models/, this file. Existing dashboard left untouched.
 
@@ -40,7 +38,7 @@ working for raw-buffer capture.
 No firmware or dataset changes pushed yet. This was an info-gathering
 and mounting-validation session.
 
-### 16:16 - <hash>
+## session 2
 Set up the SpinDoctor_STM32 CubeIDE project for the final capstone
 firmware. Brought in a previously validated LIS3DSHTR SPI driver, hit
 and fixed an include-path issue along the way: a custom subfolder
@@ -63,7 +61,8 @@ within the 2.5ms sample period, but will matter once FFT or NanoEdge
 inference sits downstream and takes long enough to create real
 contention with the next incoming sample.
 
-### 07:00 - b3a17d5
+## session 3
+
 Implemented RPM sensing via Timer Input Capture (TIM4_CH1/PB6) reading
 pulses from a Hall sensor and magnet mounted on a fan blade. Capture
 worked correctly in isolation, but real-world mounting proved
