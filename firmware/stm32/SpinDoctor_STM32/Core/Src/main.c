@@ -48,11 +48,19 @@ SPI_HandleTypeDef hspi1;
 DMA_HandleTypeDef hdma_spi1_rx;
 DMA_HandleTypeDef hdma_spi1_tx;
 
+TIM_HandleTypeDef htim4;
+
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
 LIS3_HandleTypeDef hlis;
 LIS3_DataTypeDef   data;
+
+/* RPM calculation via Timer Input Capture on TIM4_CH1 (PB6, KY-024 Hall sensor) */
+volatile uint16_t rpm_last_capture = 0;   /* counter value at the previous pulse */
+volatile uint8_t  rpm_first_capture = 1;  /* true until we've seen one real pulse */
+volatile float     rpm_value = 0;
+volatile uint32_t rpm_last_capture_tick = 0;
 
 /* Single-element circular DMA buffer for ADC1 temperature reads.
  * volatile because DMA writes it from hardware, not CPU code.
@@ -67,6 +75,7 @@ static void MX_DMA_Init(void);
 static void MX_SPI1_Init(void);
 static void MX_USART2_UART_Init(void);
 static void MX_ADC1_Init(void);
+static void MX_TIM4_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -109,6 +118,7 @@ int main(void)
   MX_SPI1_Init();
   MX_USART2_UART_Init();
   MX_ADC1_Init();
+  MX_TIM4_Init();
   /* USER CODE BEGIN 2 */
   hlis.hspi    = &hspi1;
     hlis.cs_port = GPIOE;
@@ -125,9 +135,7 @@ int main(void)
      * buffer pointer and length (1 element here, one channel only). */
     HAL_ADC_Start_DMA(&hadc1, (uint32_t*)&adc_temp_raw, 1);
 
-    printf("CAL1=%u CAL2=%u\r\n",
-           *((uint16_t*)0x1FFF7A2C),
-           *((uint16_t*)0x1FFF7A2E));
+    HAL_TIM_IC_Start_IT(&htim4, TIM_CHANNEL_1);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -157,7 +165,15 @@ int main(void)
 	             float temp_c  = ((float)(adc_temp_raw - cal1) * (110.0f - 30.0f)
 	                             / (float)(cal2 - cal1)) + 30.0f;
 	             printf("Temp: %.1f C\r\n", temp_c);
-	             printf("ADC=%u\r\n", adc_temp_raw);
+	             printf("RPM: %.0f\r\n", rpm_value);
+	             /* If no new pulse in 2 seconds, the fan has stopped or the magnet
+	              * isn't passing the sensor, force RPM to 0 rather than showing a
+	              * stale value from the last real pulse. 2000ms is comfortably longer
+	              * than one revolution period even at the fan's lowest speed. */
+	             if ((HAL_GetTick() - rpm_last_capture_tick) > 2000)
+	             {
+	                 rpm_value = 0;
+	             }
 	      }
 	  }
     /* USER CODE END WHILE */
@@ -305,6 +321,64 @@ static void MX_SPI1_Init(void)
 }
 
 /**
+  * @brief TIM4 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM4_Init(void)
+{
+
+  /* USER CODE BEGIN TIM4_Init 0 */
+
+  /* USER CODE END TIM4_Init 0 */
+
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+  TIM_IC_InitTypeDef sConfigIC = {0};
+
+  /* USER CODE BEGIN TIM4_Init 1 */
+
+  /* USER CODE END TIM4_Init 1 */
+  htim4.Instance = TIM4;
+  htim4.Init.Prescaler = 83;
+  htim4.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim4.Init.Period = 65535;
+  htim4.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim4.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim4, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_IC_Init(&htim4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim4, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sConfigIC.ICPolarity = TIM_INPUTCHANNELPOLARITY_RISING;
+  sConfigIC.ICSelection = TIM_ICSELECTION_DIRECTTI;
+  sConfigIC.ICPrescaler = TIM_ICPSC_DIV1;
+  sConfigIC.ICFilter = 0;
+  if (HAL_TIM_IC_ConfigChannel(&htim4, &sConfigIC, TIM_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM4_Init 2 */
+
+  /* USER CODE END TIM4_Init 2 */
+
+}
+
+/**
   * @brief USART2 Initialization Function
   * @param None
   * @retval None
@@ -374,6 +448,7 @@ static void MX_GPIO_Init(void)
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOE_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
+  __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(LIS3DSH_CS_GPIO_Port, LIS3DSH_CS_Pin, GPIO_PIN_SET);
@@ -433,6 +508,48 @@ void HAL_SPI_TxCpltCallback(SPI_HandleTypeDef *hspi)
 void HAL_SPI_RxCpltCallback(SPI_HandleTypeDef *hspi)
 {
     LIS3_DMA_RxCpltHandler();
+}
+
+/* HAL calls this every time TIM4 captures a rising edge on PB6, i.e. once
+ * per magnet pass on the KY-024. We measure time between two consecutive
+ * pulses (the timer's own tick count, 1us per tick at our prescaler) and
+ * convert that period directly into RPM. */
+void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
+{
+    if (htim->Instance == TIM4)
+    {
+        uint16_t current_capture = HAL_TIM_ReadCapturedValue(&htim4, TIM_CHANNEL_1);
+
+        if (rpm_first_capture)
+        {
+            /* First pulse ever seen, nothing to compare against yet,
+             * just record it and wait for the second one. */
+            rpm_last_capture = current_capture;
+            rpm_first_capture = 0;
+        }
+        else
+        {
+            uint16_t period_ticks;
+
+            /* Counter is 16-bit and free-running, it wraps from 65535
+             * back to 0. Unsigned subtraction handles the wrap correctly
+             * on its own: e.g. last=65500, current=100 gives
+             * (100 - 65500) in uint16_t math = 136, the actual elapsed
+             * ticks, no manual wrap-detection needed. */
+            period_ticks = current_capture - rpm_last_capture;
+            rpm_last_capture = current_capture;
+            rpm_last_capture_tick = HAL_GetTick();
+
+            if (period_ticks > 0)
+            {
+                /* Prescaler gives 1MHz (1us/tick). One full motor
+                 * revolution = one magnet pass = period_ticks
+                 * microseconds. RPM = 60 seconds / period in seconds. */
+                float period_seconds = (float)period_ticks / 1000000.0f;
+                rpm_value = 60.0f / period_seconds;
+            }
+        }
+    }
 }
 /* USER CODE END 4 */
 
