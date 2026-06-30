@@ -57,6 +57,7 @@ UART_HandleTypeDef huart2;
 osThreadId AccelTaskHandle;
 osThreadId DHT11TaskHandle;
 osThreadId WatchdogTaskHandle;
+osMutexId diagnosticsMutexHandle;
 /* USER CODE BEGIN PV */
 LIS3_HandleTypeDef hlis;
 LIS3_DataTypeDef   data;
@@ -72,6 +73,8 @@ volatile uint16_t adc_temp_raw;
 #define DWT_CYCCNT  (*(volatile uint32_t*)0xE0001004)
 #define DWT_CTRL    (*(volatile uint32_t*)0xE0001000)
 #define DEM_CR      (*(volatile uint32_t*)0xE000EDFC)
+
+DiagnosticsData diagnostics = {0};
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -161,6 +164,11 @@ int main(void)
     printf("DWT delta over 1ms HAL_Delay: %lu\r\n", (unsigned long)(t1 - t0));
 
   /* USER CODE END 2 */
+
+  /* Create the mutex(es) */
+  /* definition and creation of diagnosticsMutex */
+  osMutexDef(diagnosticsMutex);
+  diagnosticsMutexHandle = osMutexCreate(osMutex(diagnosticsMutex));
 
   /* USER CODE BEGIN RTOS_MUTEX */
   /* add mutexes, ... */
@@ -575,17 +583,29 @@ void StartAccelTask(void const * argument)
 	  /* Nothing blocking here anymore. DRDY interrupt -> DMA burst read
 	    * runs entirely on its own; this loop just checks the flag the
 	    * library sets once a fresh sample has actually landed. */
-	 	  if (LIS3_DataReady)
-	 	  {
-	 	      LIS3_DataReady = 0;
+	  if (LIS3_DataReady)
+	  {
+	      LIS3_DataReady = 0;
 
-	 	      static uint16_t print_counter = 0;
-	 	      if (++print_counter >= 40)   /* ~10 prints/sec at 400Hz ODR, readable */
-	 	      {
-	 	          print_counter = 0;
-	 	          printf("X:%d Y:%d Z:%d\r\n", data.x, data.y, data.z);
-	 	      }
-	 	  }
+	      static uint16_t print_counter = 0;
+	      if (++print_counter >= 40)
+	      {
+	          print_counter = 0;
+
+	          /* Hold the mutex only as long as it takes to write three
+	           * int16_t values, a handful of microseconds, then release
+	           * immediately. Never hold a mutex across something slow like
+	           * a printf call, that would needlessly block DHT11Task or
+	           * anything else waiting on the same lock. */
+	          osMutexWait(diagnosticsMutexHandle, osWaitForever);
+	          diagnostics.accel_x = data.x;
+	          diagnostics.accel_y = data.y;
+	          diagnostics.accel_z = data.z;
+	          osMutexRelease(diagnosticsMutexHandle);
+
+	          printf("X:%d Y:%d Z:%d\r\n", data.x, data.y, data.z);
+	      }
+	  }
     osDelay(1);
   }
   /* USER CODE END 5 */
@@ -605,16 +625,23 @@ void StartDHT11Task(void const * argument)
   for(;;)
   {
 	  DHT11_Data dht;
-	      if (DHT11_Read(&dht))
-	      {
-	          printf("DHT11: %d.%d%% RH, %d.%dC\r\n",
-	                 dht.humidity_int, dht.humidity_dec,
-	                 dht.temp_int, dht.temp_dec);
-	      }
-	      else
-	      {
-	          printf("DHT11: read failed\r\n");
-	      }
+	  if (DHT11_Read(&dht))
+	  {
+	      osMutexWait(diagnosticsMutexHandle, osWaitForever);
+	      diagnostics.humidity_int = dht.humidity_int;
+	      diagnostics.humidity_dec = dht.humidity_dec;
+	      diagnostics.temp_int     = dht.temp_int;
+	      diagnostics.temp_dec     = dht.temp_dec;
+	      osMutexRelease(diagnosticsMutexHandle);
+
+	      printf("DHT11: %d.%d%% RH, %d.%dC\r\n",
+	             dht.humidity_int, dht.humidity_dec,
+	             dht.temp_int, dht.temp_dec);
+	  }
+	  else
+	  {
+	      printf("DHT11: read failed\r\n");
+	  }
 
 	      osDelay(3000);  /* temperature has no urgency, 3s between reads is plenty,
 	                        * and gives the bus a clean recovery window between
