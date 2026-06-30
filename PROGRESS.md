@@ -1,10 +1,6 @@
 # SpinDoctor - Progress Log
 
-Append-only. Entries are never edited after the fact. Corrections get a new entry, not a rewrite.
-
-## Day 1 - 2026-06-29
-
-### 06:10
+## Session 1
 Set up capstone tracking structure in this repo: firmware/, backend/,
 data/, models/, this file. Existing dashboard left untouched.
 
@@ -40,7 +36,7 @@ working for raw-buffer capture.
 No firmware or dataset changes pushed yet. This was an info-gathering
 and mounting-validation session.
 
-### 16:16 - <hash>
+## Session 2
 Set up the SpinDoctor_STM32 CubeIDE project for the final capstone
 firmware. Brought in a previously validated LIS3DSHTR SPI driver, hit
 and fixed an include-path issue along the way: a custom subfolder
@@ -63,7 +59,8 @@ within the 2.5ms sample period, but will matter once FFT or NanoEdge
 inference sits downstream and takes long enough to create real
 contention with the next incoming sample.
 
-### 07:00 - b3a17d5
+## Session 3
+
 Implemented RPM sensing via Timer Input Capture (TIM4_CH1/PB6) reading
 pulses from a Hall sensor and magnet mounted on a fan blade. Capture
 worked correctly in isolation, but real-world mounting proved
@@ -88,6 +85,39 @@ Updated sensor scope: accelerometer (primary) + internal die
 temperature (secondary context). Moving to full sensor-fusion
 integration next.
 
+## Session 4
+Attempted to add a dedicated motor-adjacent temperature sensor on PB6
+(GPIO Output Open-Drain with pull-up), intended to replace the
+internal die temperature sensor with something measuring closer to
+real ambient/motor conditions. Hit a wiring/pin-conflict cleanup
+issue first (a leftover timer configuration from an earlier, separate
+sensor attempt was still claiming the pin), resolved by explicitly
+disabling and reassigning it in CubeMX.
+
+Built a UART-only diagnostic to debug presence detection without
+needing a logic analyzer or multimeter: a function that samples the
+data line repeatedly right after a reset pulse and prints the raw
+high/low sequence as a string, a software equivalent of a logic
+capture using only delay timing and printf. The trace came back flat
+(no response at all), which combined with cross-checking actual
+hardware on hand revealed the real issue: the originally planned
+sensor was never in inventory to begin with. Pivoted to the DHT11
+sensor, which was on hand and already had a proven driver pattern
+from earlier sensor bring-up work.
+
+Ported that proven DHT11 driver onto PB6, using the CubeMX-generated
+pin macros so the implementation isn't hardcoded to one specific pin.
+Confirmed working with stable, plausible ambient readings (~28C,
+~45% RH) running continuously alongside the accelerometer.
+
+Identified a real concurrency problem once both sensors were running
+together: DHT11's read sequence blocks for 18ms+ per call, which is
+incompatible with sharing a loop alongside the 400Hz accelerometer
+path. This is the trigger for the next phase: retrofitting FreeRTOS
+into the project (originally part of the locked architecture, not
+yet implemented), giving DHT11 its own low-priority task so its
+blocking behavior stops affecting time-sensitive sensor handling.
+
 ## Session 5
 Retrofitted FreeRTOS into the project, originally part of the locked
 architecture but deferred during initial sensor bring-up. Set the HAL
@@ -110,24 +140,3 @@ before moving any sensor logic into a task, then moved both sensors
 into one task to confirm correctness, then split into two tasks last.
 Each stage verified independently before adding the next.
 
-## Session 5
-Retrofitted FreeRTOS into the project, originally part of the locked
-architecture but deferred during initial sensor bring-up. Set the HAL
-timebase source to TIM6 instead of SysTick before generating, since
-FreeRTOS and HAL both want ownership of SysTick by default, a known
-conflict that needs resolving before kernel generation, not after.
-
-Split sensor handling into two priority-separated tasks, directly
-motivated by the blocking issue found in the previous session:
-AccelTask (higher priority) handles the DRDY-interrupt-driven
-accelerometer flag check, completely non-blocking. DHT11Task (lower
-priority) owns the slow, blocking DHT11 read on its own 3-second
-cycle. Confirmed working: accelerometer output streams continuously
-and unaffected while DHT11 reads happen in the background, exactly
-the behavior a single shared loop couldn't provide.
-
-Migrated incrementally and safely: enabled the FreeRTOS kernel first
-and confirmed it booted cleanly with existing code still running
-before moving any sensor logic into a task, then moved both sensors
-into one task to confirm correctness, then split into two tasks last.
-Each stage verified independently before adding the next.
