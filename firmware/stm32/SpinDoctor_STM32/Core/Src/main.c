@@ -23,6 +23,7 @@
 /* USER CODE BEGIN Includes */
 #include <stdio.h>
 #include <LIS3DSHTR.h>
+#include "DHT11.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -58,6 +59,13 @@ LIS3_DataTypeDef   data;
  * volatile because DMA writes it from hardware, not CPU code.
  * uint16_t because ADC is 12-bit (max 4095), needs 16-bit storage. */
 volatile uint16_t adc_temp_raw;
+
+/* DWT cycle counter, used for precise microsecond delays needed by
+ * the 1-Wire protocol. Cortex-M4 core feature, not a normal STM32
+ * peripheral, has nothing to do with HAL and needs no CubeMX setup. */
+#define DWT_CYCCNT  (*(volatile uint32_t*)0xE0001004)
+#define DWT_CTRL    (*(volatile uint32_t*)0xE0001000)
+#define DEM_CR      (*(volatile uint32_t*)0xE000EDFC)
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -128,6 +136,18 @@ int main(void)
     printf("CAL1=%u CAL2=%u\r\n",
            *((uint16_t*)0x1FFF7A2C),
            *((uint16_t*)0x1FFF7A2E));
+
+    /* Enable the cycle counter once at startup. DEM_CR bit24 unlocks
+     * access to the DWT block, DWT_CTRL bit0 starts the counter itself. */
+    DEM_CR |= (1 << 24);
+    DWT_CYCCNT = 0;
+    DWT_CTRL |= 1;
+
+    uint32_t t0 = DWT_CYCCNT;
+    HAL_Delay(1);  /* should take roughly 168000 cycles at 168MHz */
+    uint32_t t1 = DWT_CYCCNT;
+    printf("DWT delta over 1ms HAL_Delay: %lu\r\n", (unsigned long)(t1 - t0));
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -147,17 +167,18 @@ int main(void)
 	          print_counter = 0;
 	          printf("X:%d Y:%d Z:%d\r\n", data.x, data.y, data.z);
 
-	          /* Convert raw ADC count to degrees Celsius using factory
-	              * calibration values burned into fixed flash addresses at
-	              * production. TS_CAL1 is raw ADC at 30C, TS_CAL2 at 110C,
-	              * both at VDDA=3.3V. Linear interpolation between the two
-	              * known points gives actual temperature. */
-	             uint16_t cal1 = *((uint16_t*)0x1FFF7A2C);
-	             uint16_t cal2 = *((uint16_t*)0x1FFF7A2E);
-	             float temp_c  = ((float)(adc_temp_raw - cal1) * (110.0f - 30.0f)
-	                             / (float)(cal2 - cal1)) + 30.0f;
-	             printf("Temp: %.1f C\r\n", temp_c);
-	             printf("ADC=%u\r\n", adc_temp_raw);
+	          DHT11_Data dht;
+	          if (DHT11_Read(&dht))
+	          {
+	              printf("DHT11: %d.%d%% RH, %d.%dC\r\n",
+	                     dht.humidity_int, dht.humidity_dec,
+	                     dht.temp_int, dht.temp_dec);
+	          }
+	          else
+	          {
+	              printf("DHT11: read failed\r\n");
+	          }
+
 	      }
 	  }
     /* USER CODE END WHILE */
@@ -374,9 +395,13 @@ static void MX_GPIO_Init(void)
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOE_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
+  __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(LIS3DSH_CS_GPIO_Port, LIS3DSH_CS_Pin, GPIO_PIN_SET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(DHT11_DATA_GPIO_Port, DHT11_DATA_Pin, GPIO_PIN_SET);
 
   /*Configure GPIO pin : LIS3DSH_CS_Pin */
   GPIO_InitStruct.Pin = LIS3DSH_CS_Pin;
@@ -384,6 +409,13 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(LIS3DSH_CS_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : DHT11_DATA_Pin */
+  GPIO_InitStruct.Pin = DHT11_DATA_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_OD;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(DHT11_DATA_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pin : PE0 */
   GPIO_InitStruct.Pin = GPIO_PIN_0;
@@ -434,6 +466,18 @@ void HAL_SPI_RxCpltCallback(SPI_HandleTypeDef *hspi)
 {
     LIS3_DMA_RxCpltHandler();
 }
+
+/* Busy-wait for a precise number of microseconds, using the DWT cycle
+ * counter. SystemCoreClock is 168000000 (168MHz) in this project, so
+ * cycles-per-microsecond = 168. Unsigned subtraction handles the
+ * counter wrapping the same way the timer capture did earlier. */
+void delay_us(uint32_t us)
+{
+    uint32_t start = DWT_CYCCNT;
+    uint32_t cycles = us * (SystemCoreClock / 1000000);
+    while ((DWT_CYCCNT - start) < cycles) { }
+}
+
 /* USER CODE END 4 */
 
 /**
