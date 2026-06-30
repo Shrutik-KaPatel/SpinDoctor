@@ -183,3 +183,16 @@ instead, where it belongs.
 No behavioral change yet, this is purely the safe-sharing
 infrastructure landing correctly before anything actually consumes
 the shared struct.
+
+## Session 9
+Implemented ping-pong double buffering on the LIS3DSH DMA burst-read
+pipeline. Changed burst_rx_buf from a single 6-byte array to two
+6-byte arrays, with active_buf_idx tracking which one DMA just
+finished filling. TxCpltHandler always points DMA at the buffer
+AccelTask is not currently reading, RxCpltHandler flips the index
+and reconstructs XYZ from the freshly filled buffer. No behavioral
+change visible at the terminal since the current consumer (a throttled
+printf) finishes well within the 2.5ms sample window, but this is a
+hard prerequisite for the FFT and NanoEdge inference steps coming
+next, where processing time will meaningfully compete with the 400Hz
+sample rate.
