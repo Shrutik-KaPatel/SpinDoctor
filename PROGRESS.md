@@ -62,3 +62,28 @@ since the only consumer right now (throttled printf) finishes well
 within the 2.5ms sample period, but will matter once FFT or NanoEdge
 inference sits downstream and takes long enough to create real
 contention with the next incoming sample.
+
+### 07:00 - b3a17d5
+Implemented RPM sensing via Timer Input Capture (TIM4_CH1/PB6) reading
+pulses from a Hall sensor and magnet mounted on a fan blade. Capture
+worked correctly in isolation, but real-world mounting proved
+fundamentally difficult on this hardware: any magnet large enough for
+reliable detection introduced a real, physically significant rotor
+imbalance at the blade radius, which got worse rather than better when
+moved toward the hub due to limited surface area there. The imbalance
+caused enough vibration to tilt the assembly during operation,
+intermittently losing sensor alignment, and at higher fan speeds the
+imbalance was severe enough to walk the entire base across the
+surface it was sitting on.
+
+Decision: descoped RPM sensing from the capstone given the time
+budget. The accelerometer alone already provides a complete fault
+signal for all three target classes (healthy, imbalance, obstruction)
+via vibration FFT, RPM was intended as a secondary correlating signal,
+not a load-bearing one. Working RPM implementation is preserved on a
+separate branch and can be revisited if time allows; it is not part
+of the integrated firmware going forward.
+
+Updated sensor scope: accelerometer (primary) + internal die
+temperature (secondary context). Moving to full sensor-fusion
+integration next.
