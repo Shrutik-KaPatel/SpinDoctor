@@ -46,6 +46,8 @@
 ADC_HandleTypeDef hadc1;
 DMA_HandleTypeDef hdma_adc1;
 
+IWDG_HandleTypeDef hiwdg;
+
 SPI_HandleTypeDef hspi1;
 DMA_HandleTypeDef hdma_spi1_rx;
 DMA_HandleTypeDef hdma_spi1_tx;
@@ -54,6 +56,7 @@ UART_HandleTypeDef huart2;
 
 osThreadId AccelTaskHandle;
 osThreadId DHT11TaskHandle;
+osThreadId WatchdogTaskHandle;
 /* USER CODE BEGIN PV */
 LIS3_HandleTypeDef hlis;
 LIS3_DataTypeDef   data;
@@ -78,8 +81,10 @@ static void MX_DMA_Init(void);
 static void MX_SPI1_Init(void);
 static void MX_USART2_UART_Init(void);
 static void MX_ADC1_Init(void);
+static void MX_IWDG_Init(void);
 void StartAccelTask(void const * argument);
 void StartDHT11Task(void const * argument);
+void StartWatchdogTask(void const * argument);
 
 /* USER CODE BEGIN PFP */
 
@@ -123,6 +128,7 @@ int main(void)
   MX_SPI1_Init();
   MX_USART2_UART_Init();
   MX_ADC1_Init();
+  MX_IWDG_Init();
   /* USER CODE BEGIN 2 */
   hlis.hspi    = &hspi1;
     hlis.cs_port = GPIOE;
@@ -180,6 +186,10 @@ int main(void)
   /* definition and creation of DHT11Task */
   osThreadDef(DHT11Task, StartDHT11Task, osPriorityLow, 0, 128);
   DHT11TaskHandle = osThreadCreate(osThread(DHT11Task), NULL);
+
+  /* definition and creation of WatchdogTask */
+  osThreadDef(WatchdogTask, StartWatchdogTask, osPriorityLow, 0, 128);
+  WatchdogTaskHandle = osThreadCreate(osThread(WatchdogTask), NULL);
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
@@ -246,9 +256,10 @@ void SystemClock_Config(void)
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI|RCC_OSCILLATORTYPE_LSI;
   RCC_OscInitStruct.HSIState = RCC_HSI_ON;
   RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+  RCC_OscInitStruct.LSIState = RCC_LSI_ON;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
   RCC_OscInitStruct.PLL.PLLM = 8;
@@ -324,6 +335,34 @@ static void MX_ADC1_Init(void)
   /* USER CODE BEGIN ADC1_Init 2 */
 
   /* USER CODE END ADC1_Init 2 */
+
+}
+
+/**
+  * @brief IWDG Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_IWDG_Init(void)
+{
+
+  /* USER CODE BEGIN IWDG_Init 0 */
+
+  /* USER CODE END IWDG_Init 0 */
+
+  /* USER CODE BEGIN IWDG_Init 1 */
+
+  /* USER CODE END IWDG_Init 1 */
+  hiwdg.Instance = IWDG;
+  hiwdg.Init.Prescaler = IWDG_PRESCALER_32;
+  hiwdg.Init.Reload = 1999;
+  if (HAL_IWDG_Init(&hiwdg) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN IWDG_Init 2 */
+
+  /* USER CODE END IWDG_Init 2 */
 
 }
 
@@ -582,6 +621,30 @@ void StartDHT11Task(void const * argument)
 	                        * 1-wire transactions */
   }
   /* USER CODE END StartDHT11Task */
+}
+
+/* USER CODE BEGIN Header_StartWatchdogTask */
+/**
+* @brief Function implementing the WatchdogTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartWatchdogTask */
+void StartWatchdogTask(void const * argument)
+{
+  /* USER CODE BEGIN StartWatchdogTask */
+  /* Infinite loop */
+  for(;;)
+  {
+	  /* Refresh every 500ms, comfortably under the 2-second IWDG
+	         * window. This task only ever runs if the scheduler is still
+	         * actually switching between tasks, if any task hangs hard
+	         * enough to starve the scheduler entirely, this refresh stops
+	         * happening and IWDG forces a full chip reset within 2 seconds. */
+	        HAL_IWDG_Refresh(&hiwdg);
+	        osDelay(500);
+  }
+  /* USER CODE END StartWatchdogTask */
 }
 
 /**
