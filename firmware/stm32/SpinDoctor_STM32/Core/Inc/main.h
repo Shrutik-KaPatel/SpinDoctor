@@ -54,6 +54,23 @@ typedef struct {
 } DiagnosticsData;
 
 extern DiagnosticsData diagnostics;
+
+#define FFT_SIZE 256
+
+/* Raw sample accumulation buffers, filled by AccelTask one sample at
+ * a time. Once fft_sample_count reaches FFT_SIZE, AccelTask swaps to
+ * the other half of a ping-pong pair and signals FFTTask to process
+ * the completed half. This is a block-level ping-pong, separate from
+ * the single-sample ping-pong already in LIS3DSHTR.c, needed because
+ * FFT processing takes long enough that the next accumulation window
+ * could otherwise start overwriting data FFTTask hasn't read yet. */
+#include <stdint.h>
+#include "arm_math.h"
+extern float32_t fft_buf_x[2][FFT_SIZE];
+extern float32_t fft_buf_y[2][FFT_SIZE];
+extern float32_t fft_buf_z[2][FFT_SIZE];
+extern volatile uint8_t fft_fill_idx;   /* which half AccelTask is currently filling */
+extern volatile uint16_t fft_sample_count;
 /* USER CODE END Includes */
 
 /* Exported types ------------------------------------------------------------*/
