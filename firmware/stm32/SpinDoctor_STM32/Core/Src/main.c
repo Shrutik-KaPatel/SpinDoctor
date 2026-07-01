@@ -541,7 +541,27 @@ int _write(int file, char *ptr, int len)
 
     return len;
 }
+/* FreeRTOS calls this automatically if stack overflow checking
+ * (Method 2) detects a task has overrun its allocated stack. Uses
+ * direct blocking HAL_UART_Transmit, not printf: the offending
+ * task's stack may already be corrupted, and printf's internal
+ * formatting pushes more onto that same stack, risking further
+ * corruption before the message gets out. */
+void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
+{
+    char msg[64];
+    int len = 0;
+    const char *prefix = "!!! STACK OVERFLOW in task: ";
+    while (prefix[len]) { msg[len] = prefix[len]; len++; }
+    int i = 0;
+    while (pcTaskName[i] && len < 60) { msg[len++] = pcTaskName[i++]; }
+    msg[len++] = '\r';
+    msg[len++] = '\n';
 
+    HAL_UART_Transmit(&huart2, (uint8_t*)msg, len, HAL_MAX_DELAY);
+
+    while(1) { }
+}
 /* HAL calls this automatically once a UART DMA transmit completes.
  * Releasing the semaphore here, not inside _write() itself, is what
  * makes this safe across tasks, the next printf can't start a new
