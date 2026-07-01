@@ -59,6 +59,7 @@ osThreadId AccelTaskHandle;
 osThreadId DHT11TaskHandle;
 osThreadId WatchdogTaskHandle;
 osMutexId diagnosticsMutexHandle;
+osMutexId printfMutexHandle;
 osSemaphoreId uartTxSemaphoreHandle;
 /* USER CODE BEGIN PV */
 LIS3_HandleTypeDef hlis;
@@ -162,6 +163,10 @@ int main(void)
   /* definition and creation of diagnosticsMutex */
   osMutexDef(diagnosticsMutex);
   diagnosticsMutexHandle = osMutexCreate(osMutex(diagnosticsMutex));
+
+  /* definition and creation of printfMutex */
+  osMutexDef(printfMutex);
+  printfMutexHandle = osMutexCreate(osMutex(printfMutex));
 
   /* USER CODE BEGIN RTOS_MUTEX */
   /* add mutexes, ... */
@@ -614,7 +619,6 @@ void StartAccelTask(void const * argument)
 	      if (++print_counter >= 40)
 	      {
 	          print_counter = 0;
-
 	          /* Hold the mutex only as long as it takes to write three
 	           * int16_t values, a handful of microseconds, then release
 	           * immediately. Never hold a mutex across something slow like
@@ -626,7 +630,9 @@ void StartAccelTask(void const * argument)
 	          diagnostics.accel_z = data.z;
 	          osMutexRelease(diagnosticsMutexHandle);
 
+	          osMutexWait(printfMutexHandle, osWaitForever);
 	          printf("X:%d Y:%d Z:%d\r\n", data.x, data.y, data.z);
+	          osMutexRelease(printfMutexHandle);
 	      }
 	  }
     osDelay(1);
@@ -648,27 +654,29 @@ void StartDHT11Task(void const * argument)
   for(;;)
   {
 	  DHT11_Data dht;
-	  if (DHT11_Read(&dht))
-	  {
-	      osMutexWait(diagnosticsMutexHandle, osWaitForever);
-	      diagnostics.humidity_int = dht.humidity_int;
-	      diagnostics.humidity_dec = dht.humidity_dec;
-	      diagnostics.temp_int     = dht.temp_int;
-	      diagnostics.temp_dec     = dht.temp_dec;
-	      osMutexRelease(diagnosticsMutexHandle);
+		  if (DHT11_Read(&dht))
+		  {
+		      osMutexWait(diagnosticsMutexHandle, osWaitForever);
+		      diagnostics.humidity_int = dht.humidity_int;
+		      diagnostics.humidity_dec = dht.humidity_dec;
+		      diagnostics.temp_int     = dht.temp_int;
+		      diagnostics.temp_dec     = dht.temp_dec;
+		      osMutexRelease(diagnosticsMutexHandle);
 
-	      printf("DHT11: %d.%d%% RH, %d.%dC\r\n",
-	             dht.humidity_int, dht.humidity_dec,
-	             dht.temp_int, dht.temp_dec);
-	  }
-	  else
-	  {
-	      printf("DHT11: read failed\r\n");
-	  }
-
-	      osDelay(3000);  /* temperature has no urgency, 3s between reads is plenty,
-	                        * and gives the bus a clean recovery window between
-	                        * 1-wire transactions */
+		      osMutexWait(printfMutexHandle, osWaitForever);
+		      printf("DHT11: %d.%d%% RH, %d.%dC\r\n",
+		             dht.humidity_int, dht.humidity_dec,
+		             dht.temp_int, dht.temp_dec);
+		      osMutexRelease(printfMutexHandle);
+		  }
+		  else
+		  {
+		      osMutexWait(printfMutexHandle, osWaitForever);
+		      printf("DHT11: read failed\r\n");
+		      osMutexRelease(printfMutexHandle);
+		  }
+		      osDelay(3000);  /* temperature has no urgency, 3s between reads is plenty,
+		                        * and gives the bus a clean recovery window between*/
   }
   /* USER CODE END StartDHT11Task */
 }
