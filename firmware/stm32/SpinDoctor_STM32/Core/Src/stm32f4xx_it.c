@@ -22,6 +22,7 @@
 #include "stm32f4xx_it.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include <stdio.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -92,6 +93,23 @@ void HardFault_Handler(void)
 {
   /* USER CODE BEGIN HardFault_IRQn 0 */
 
+	  /* Standard Cortex-M fault diagnostic pattern: the CPU automatically
+	   * pushes R0-R3, R12, LR, PC, and PSR onto the stack when any fault
+	   * exception fires, before jumping here. This figures out which
+	   * stack pointer (MSP or PSP) was active at fault time, then hands
+	   * that address to a C function that reads out PC (the exact
+	   * faulting instruction address) and prints it. */
+	  __asm volatile
+	  (
+	    " tst lr, #4                                                \n"
+	    " ite eq                                                    \n"
+	    " mrseq r0, msp                                             \n"
+	    " mrsne r0, psp                                             \n"
+	    " ldr r1, [r0, #24]                                         \n"
+	    " ldr r2, handler2_address_const                            \n"
+	    " bx r2                                                     \n"
+	    " handler2_address_const: .word prvGetRegistersFromStack    \n"
+	  );
   /* USER CODE END HardFault_IRQn 0 */
   while (1)
   {
@@ -278,5 +296,30 @@ void DMA2_Stream4_IRQHandler(void)
 }
 
 /* USER CODE BEGIN 1 */
+void prvGetRegistersFromStack(uint32_t *pulFaultStackAddress)
+{
+    volatile uint32_t r0  = pulFaultStackAddress[0];
+    volatile uint32_t r1  = pulFaultStackAddress[1];
+    volatile uint32_t r2  = pulFaultStackAddress[2];
+    volatile uint32_t r3  = pulFaultStackAddress[3];
+    volatile uint32_t r12 = pulFaultStackAddress[4];
+    volatile uint32_t lr  = pulFaultStackAddress[5];
+    volatile uint32_t pc  = pulFaultStackAddress[6];
+    volatile uint32_t psr = pulFaultStackAddress[7];
+    volatile uint32_t cfsr = *((volatile uint32_t *)0xE000ED28);
+
+    char msg[220];
+    int len = 0;
+    len += sprintf(msg + len, "\r\n!!! HARD FAULT !!!\r\n");
+    len += sprintf(msg + len, "PC=0x%08lX LR=0x%08lX PSR=0x%08lX\r\n", pc, lr, psr);
+    len += sprintf(msg + len, "R0=0x%08lX R1=0x%08lX R2=0x%08lX R3=0x%08lX R12=0x%08lX\r\n",
+                    r0, r1, r2, r3, r12);
+    len += sprintf(msg + len, "CFSR=0x%08lX\r\n", cfsr);
+
+    extern UART_HandleTypeDef huart2;
+    HAL_UART_Transmit(&huart2, (uint8_t*)msg, len, HAL_MAX_DELAY);
+
+    while(1) { }
+}
 
 /* USER CODE END 1 */
