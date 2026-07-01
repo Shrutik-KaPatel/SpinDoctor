@@ -143,6 +143,12 @@ int main(void)
     LIS3_WriteReg(&hlis, LIS3_CTRL_REG3, LIS3_CTRL_REG3_DRDY_INT1);   /* NEW: routes DRDY to INT1/PE0, without
                                                                         this the chip never pulses PE0 and
                                                                         no EXTI interrupt ever fires */
+    /* Enable the DWT cycle counter. Required by delay_us() and DHT11's
+         * bit-timing. Missing since Session 8 cleanup, silently hangs
+         * DHT11Task forever without it, no crash, just permanently stuck. */
+        DEM_CR |= (1 << 24);
+        DWT_CYCCNT = 0;
+        DWT_CTRL |= 1;
 
     /* Start ADC1 in DMA circular mode. From this point the DMA keeps
      * adc_temp_raw updated automatically on every completed conversion,
@@ -677,17 +683,38 @@ void StartDHT11Task(void const * argument)
 void StartWatchdogTask(void const * argument)
 {
   /* USER CODE BEGIN StartWatchdogTask */
-  /* Infinite loop */
-  for(;;)
-  {
-	  /* Refresh every 500ms, comfortably under the 2-second IWDG
+
+	  /* Reset-cause check using DIRECT blocking UART, not printf, so this
+	     * cannot touch any mutex/semaphore and cannot deadlock. Confirming
+	     * whether this pre-FFT baseline resets at all, same instrumentation
+	     * used to isolate the FFT-branch regression earlier today. */
+	    char msg[80];
+	    int len = 0;
+	    if (__HAL_RCC_GET_FLAG(RCC_FLAG_IWDGRST))
+	        len = sprintf(msg, "RESET: IWDG\r\n");
+	    else if (__HAL_RCC_GET_FLAG(RCC_FLAG_LPWRRST))
+	        len = sprintf(msg, "RESET: LOW POWER / BROWNOUT\r\n");
+	    else if (__HAL_RCC_GET_FLAG(RCC_FLAG_PORRST))
+	        len = sprintf(msg, "RESET: POWER-ON\r\n");
+	    else if (__HAL_RCC_GET_FLAG(RCC_FLAG_PINRST))
+	        len = sprintf(msg, "RESET: PIN/NRST\r\n");
+	    else
+	        len = sprintf(msg, "RESET: OTHER/UNKNOWN\r\n");
+	    HAL_UART_Transmit(&huart2, (uint8_t*)msg, len, HAL_MAX_DELAY);
+	    __HAL_RCC_CLEAR_RESET_FLAGS();
+
+	    /* Infinite loop */
+	    for(;;)
+	    {
+	        /* Refresh every 500ms, comfortably under the 2-second IWDG
 	         * window. This task only ever runs if the scheduler is still
 	         * actually switching between tasks, if any task hangs hard
 	         * enough to starve the scheduler entirely, this refresh stops
 	         * happening and IWDG forces a full chip reset within 2 seconds. */
 	        HAL_IWDG_Refresh(&hiwdg);
 	        osDelay(500);
-  }
+	    }
+
   /* USER CODE END StartWatchdogTask */
 }
 
