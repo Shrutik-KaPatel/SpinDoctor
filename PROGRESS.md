@@ -267,3 +267,88 @@ since the signal collapses entirely with the fan off. 56.25Hz / 3
 blades = 18.75Hz fundamental = 1125 RPM, sits centered in the
 independently measured 900-1400 RPM range, a strong cross-check that
 the FFT pipeline is producing physically meaningful output.
+
+## Session 11
+Built and validated a CMSIS-DSP FFT pipeline on the accelerometer path (real
+FFT, 256-point, dedicated FFTTask, full details in Session 10). Confirmed the
+signal was real and physically meaningful: fan-on peaks were sharp and
+stable, fan-off collapsed to noise, and the blade-pass frequency (56.25Hz)
+matched independently measured RPM. Then discovered, during extended runtime
+with FFT active, that the system began resetting on a roughly 2-second
+cycle, tied to the IWDG watchdog firing.
+
+Spent the majority of this session root-causing that regression through
+systematic elimination rather than guessing. In order, ruled out: FFT
+compute time (measured via DWT, consistently under 5ms), a stack overflow
+in FFTTask (enabled FreeRTOS's Method 2 stack checking, canary+pointer
+check, never fired even at 4x the original stack size), a hard fault
+(added a full Cortex-M fault handler with register/PC dump, never fired),
+DHT11's bit-banging driver (isolated by stubbing it out entirely, resets
+persisted; separately, full driver review showed every wait loop has a
+proper DWT timeout, no possible hang), printf/newlib reentrancy corruption
+across tasks (real bug, fixed by adding printfMutex to serialize the full
+printf call, not just the DMA transfer, but did not affect reset frequency),
+LSI clock imprecision (widened the IWDG window fourfold, reset spacing
+scaled proportionally rather than becoming rare, ruling this out), and
+SPI/DMA/DRDY silently stalling (added a last-seen-DRDY timestamp check,
+never triggered).
+
+Physical/hardware causes were tested next, using the actual physical mount
+and cabling as the constant while swapping firmware: flashed a bare
+GPIO-only test program with zero peripherals, ran clean for several minutes
+on the vibrating mount, ruling out the physical USB/power/NRST connection.
+Flashed a standalone bare-metal accelerometer test (same LIS3DSH, same
+SPI1/DMA/DRDY interrupt chain, no RTOS) on the same mount, also ran clean,
+ruling out the sensor path itself. Flashed a minimal FreeRTOS+IWDG test
+program with a deliberately hung task, confirmed IWDG fired correctly and
+only when genuinely warranted, ruling out the watchdog/RTOS combination
+itself being unreliable on this hardware.
+
+With every individual component and the physical setup cleared, bisected
+directly: checked out the last commit before any FFT-related work, clean
+rebuilt, and ran the exact same reset-cause instrumentation. Zero resets
+over multiple extended runs. This isolated the regression specifically to
+the FFT/CMSIS-DSP integration, most likely something in the library
+linkage or memory layout it introduced, since the isolation tests that
+stubbed out FFT's actual logic (while still linking the library) never
+resolved the resets on that branch, but removing the commit entirely did.
+
+Decision: abandon the FFT pipeline going forward. NanoEdge AI Studio's own
+documentation confirms it wants raw time-domain buffers for training, not
+pre-computed FFT output, it applies its own preprocessing internally during
+benchmarking. FFT was never load-bearing for the actual pipeline; it served
+its purpose as a sensor/mount validation step and is preserved on its own
+branch, not merged forward.
+
+Rebuilt from the pre-FFT baseline and layered back five specific,
+independent hardening fixes, each tested individually before moving to the
+next: restored the DWT cycle counter enable (accidentally dropped in an
+earlier session, was silently hanging the DHT11 task forever with no
+crash and no output, a bug that predated FFT and had gone unnoticed);
+added printfMutex to prevent print corruption across tasks; added a
+reset-cause check using direct blocking UART (deliberately bypassing
+printf, so it can never itself deadlock) reporting IWDG vs brownout vs
+power-on vs pin reset; enabled stack overflow detection with a safe
+UART-only hook; added a full hard fault handler with register dump. All
+five confirmed stable together over an extended run.
+
+Two known, low-severity issues identified late in the session, deliberately
+left unfixed rather than risk further regressions this late: rare UART
+output corruption when two tasks print at nearly the same instant (a torn
+splice, cosmetic log corruption only, not data loss), and a single isolated
+IWDG reset observed after a long clean run with no clear trigger. Attempted
+a quick fix for the UART splice by adding a second wait on the UART
+transmit semaphore inside the reset-cause handler; this was wrong, since
+that handler uses blocking (non-DMA) transmission which never completes
+the semaphore's paired release, permanently draining the token and freezing
+every future printf in the system. Caught immediately via the same
+stack-overflow/reset instrumentation this session had just added, reverted
+before committing. Real lesson: uartTxSemaphore must only ever be
+paired with DMA-mode transmission, since only the DMA completion callback
+releases it, any blocking HAL_UART_Transmit call must not touch it.
+
+Both remaining issues are cosmetic/rare enough to defer safely, confirmed
+that a reset is a clean, total event (full reboot, not silent data
+corruption), so a capture that gets interrupted by one will show an
+obvious break in the stream and can simply be discarded and redone, not a
+threat to data quality for the NanoEdge training captures coming next.
