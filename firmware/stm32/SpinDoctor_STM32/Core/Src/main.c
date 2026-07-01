@@ -58,8 +58,10 @@ DMA_HandleTypeDef hdma_usart2_tx;
 osThreadId AccelTaskHandle;
 osThreadId DHT11TaskHandle;
 osThreadId WatchdogTaskHandle;
+osThreadId FFTTaskHandle;
 osMutexId diagnosticsMutexHandle;
 osSemaphoreId uartTxSemaphoreHandle;
+osSemaphoreId fftDataReadySemaphoreHandle;
 /* USER CODE BEGIN PV */
 LIS3_HandleTypeDef hlis;
 LIS3_DataTypeDef   data;
@@ -77,6 +79,28 @@ volatile uint16_t adc_temp_raw;
 #define DEM_CR      (*(volatile uint32_t*)0xE000EDFC)
 
 DiagnosticsData diagnostics = {0};
+
+float32_t fft_buf_x[2][FFT_SIZE];
+float32_t fft_buf_y[2][FFT_SIZE];
+float32_t fft_buf_z[2][FFT_SIZE];
+volatile uint8_t fft_fill_idx = 0;
+volatile uint16_t fft_sample_count = 0;
+
+arm_rfft_fast_instance_f32 fft_instance;
+
+/* Output magnitude buffers, one per axis. arm_rfft_fast_f32 produces
+ * FFT_SIZE complex-interleaved floats; arm_cmplx_mag_f32 collapses
+ * that to FFT_SIZE/2 real magnitude bins (bin 0 = DC, bins 1..127 =
+ * real frequency content up to Nyquist at our 400Hz ODR). */
+float32_t fft_mag_x[FFT_SIZE / 2];
+float32_t fft_mag_y[FFT_SIZE / 2];
+float32_t fft_mag_z[FFT_SIZE / 2];
+
+/* Which buffer half is ready for FFTTask to process, set by AccelTask
+ * right before releasing fftDataReadySemaphore. Safe without a mutex
+ * since there's exactly one producer and one consumer, and the write
+ * always happens-before the semaphore release that wakes the reader. */
+volatile uint8_t fft_ready_idx = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -90,6 +114,7 @@ static void MX_IWDG_Init(void);
 void StartAccelTask(void const * argument);
 void StartDHT11Task(void const * argument);
 void StartWatchdogTask(void const * argument);
+void StartFFTTask(void const * argument);
 
 /* USER CODE BEGIN PFP */
 
@@ -150,6 +175,10 @@ int main(void)
      * buffer pointer and length (1 element here, one channel only). */
     HAL_ADC_Start_DMA(&hadc1, (uint32_t*)&adc_temp_raw, 1);
 
+    /* One-time FFT init, computes twiddle factors etc. for this FFT size.
+     * ifftFlag=0 (arg to the process call later, not here) since we only
+     * ever go time->frequency, never inverse. */
+    arm_rfft_fast_init_f32(&fft_instance, FFT_SIZE);
   /* USER CODE END 2 */
 
   /* Create the mutex(es) */
@@ -166,7 +195,17 @@ int main(void)
   osSemaphoreDef(uartTxSemaphore);
   uartTxSemaphoreHandle = osSemaphoreCreate(osSemaphore(uartTxSemaphore), 1);
 
+  /* definition and creation of fftDataReadySemaphore */
+  osSemaphoreDef(fftDataReadySemaphore);
+  fftDataReadySemaphoreHandle = osSemaphoreCreate(osSemaphore(fftDataReadySemaphore), 1);
+
   /* USER CODE BEGIN RTOS_SEMAPHORES */
+  /* fftDataReadySemaphore is created with 1 token available by default
+   * in CMSIS_V1 regardless of the "Depleted" GUI setting, drain it here
+   * so FFTTask correctly blocks until AccelTask actually signals a
+   * completed window, rather than running once immediately on boot
+   * with garbage/zeroed buffer data. */
+  osSemaphoreWait(fftDataReadySemaphoreHandle, 0);
   /* add semaphores, ... */
   /* USER CODE END RTOS_SEMAPHORES */
 
@@ -191,6 +230,10 @@ int main(void)
   osThreadDef(WatchdogTask, StartWatchdogTask, osPriorityLow, 0, 128);
   WatchdogTaskHandle = osThreadCreate(osThread(WatchdogTask), NULL);
 
+  /* definition and creation of FFTTask */
+  osThreadDef(FFTTask, StartFFTTask, osPriorityBelowNormal, 0, 512);
+  FFTTaskHandle = osThreadCreate(osThread(FFTTask), NULL);
+
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
   /* USER CODE END RTOS_THREADS */
@@ -210,6 +253,8 @@ int main(void)
 	  if (LIS3_DataReady)
 	  {
 	      LIS3_DataReady = 0;
+
+
 
 	      static uint16_t print_counter = 0;
 	      if (++print_counter >= 40)   /* ~10 prints/sec at 400Hz ODR, readable */
@@ -604,6 +649,26 @@ void StartAccelTask(void const * argument)
 	  {
 	      LIS3_DataReady = 0;
 
+	      /* Append this sample into the currently-filling half of each
+	                 * axis's ping-pong buffer. */
+	                fft_buf_x[fft_fill_idx][fft_sample_count] = (float32_t)data.x;
+	                fft_buf_y[fft_fill_idx][fft_sample_count] = (float32_t)data.y;
+	                fft_buf_z[fft_fill_idx][fft_sample_count] = (float32_t)data.z;
+	                fft_sample_count++;
+
+	                if (fft_sample_count >= FFT_SIZE)
+	                {
+	                    /* Window complete. Record which half is ready, wake FFTTask,
+	                     * then swap to the other half and reset the counter so
+	                     * accumulation continues without missing samples while
+	                     * FFTTask processes the completed one. */
+	                    fft_ready_idx = fft_fill_idx;
+	                    fft_fill_idx = 1 - fft_fill_idx;
+	                    fft_sample_count = 0;
+
+	                    osSemaphoreRelease(fftDataReadySemaphoreHandle);
+	                }
+
 	      static uint16_t print_counter = 0;
 	      if (++print_counter >= 40)
 	      {
@@ -689,6 +754,73 @@ void StartWatchdogTask(void const * argument)
 	        osDelay(500);
   }
   /* USER CODE END StartWatchdogTask */
+}
+
+/* USER CODE BEGIN Header_StartFFTTask */
+/**
+* @brief Function implementing the FFTTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartFFTTask */
+void StartFFTTask(void const * argument)
+{
+  /* USER CODE BEGIN StartFFTTask */
+  /* Infinite loop */
+  for(;;)
+  {
+	  /* Block here until AccelTask signals a completed 256-sample
+	         * window. osWaitForever is correct, this task has nothing
+	         * useful to do until real data exists, no reason to poll. */
+	        osSemaphoreWait(fftDataReadySemaphoreHandle, osWaitForever);
+
+	        uint8_t idx = fft_ready_idx;  /* snapshot which half is safe to read */
+
+	        /* arm_rfft_fast_f32 processes one real-valued array at a time,
+	         * there's no 3-axis variant, so run it three times sequentially.
+	         * ifftFlag=0 means forward transform (time->frequency). Output
+	         * is FFT_SIZE floats in complex-interleaved format:
+	         * [re0, im0, re1, im1, ...], NOT FFT_SIZE/2 complex pairs plus
+	         * a separate DC/Nyquist pair, arm_rfft_fast_f32 packs this
+	         * slightly differently than a naive complex FFT would, but
+	         * arm_cmplx_mag_f32 below handles the interleaved format
+	         * correctly regardless. */
+	        static float32_t fft_out_x[FFT_SIZE];
+	        static float32_t fft_out_y[FFT_SIZE];
+	        static float32_t fft_out_z[FFT_SIZE];
+
+	        arm_rfft_fast_f32(&fft_instance, fft_buf_x[idx], fft_out_x, 0);
+	        arm_rfft_fast_f32(&fft_instance, fft_buf_y[idx], fft_out_y, 0);
+	        arm_rfft_fast_f32(&fft_instance, fft_buf_z[idx], fft_out_z, 0);
+
+	        /* Collapse complex output to real magnitude, FFT_SIZE/2 bins
+	         * per axis. Bin 0 = DC/gravity offset, bins 1..127 = real
+	         * frequency content, bin_hz = 400Hz / 256 = 1.5625Hz per bin. */
+	        arm_cmplx_mag_f32(fft_out_x, fft_mag_x, FFT_SIZE / 2);
+	        arm_cmplx_mag_f32(fft_out_y, fft_mag_y, FFT_SIZE / 2);
+	        arm_cmplx_mag_f32(fft_out_z, fft_mag_z, FFT_SIZE / 2);
+
+	        /* Find peak bin per axis, skipping bin 0 (DC/gravity), same
+	         * approach validated in the mini-project bring-up. */
+	        float32_t bin_hz = 400.0f / FFT_SIZE;
+
+	        float32_t peak_x = 0, peak_y = 0, peak_z = 0;
+	        uint16_t peak_bin_x = 1, peak_bin_y = 1, peak_bin_z = 1;
+
+	        for (int i = 1; i < FFT_SIZE / 2; i++)
+	        {
+	            if (fft_mag_x[i] > peak_x) { peak_x = fft_mag_x[i]; peak_bin_x = i; }
+	            if (fft_mag_y[i] > peak_y) { peak_y = fft_mag_y[i]; peak_bin_y = i; }
+	            if (fft_mag_z[i] > peak_z) { peak_z = fft_mag_z[i]; peak_bin_z = i; }
+	        }
+
+	        printf("FFT X: %.2fHz (%.1f)  Y: %.2fHz (%.1f)  Z: %.2fHz (%.1f)\r\n",
+	               peak_bin_x * bin_hz, peak_x,
+	               peak_bin_y * bin_hz, peak_y,
+	               peak_bin_z * bin_hz, peak_z);
+    osDelay(1);
+  }
+  /* USER CODE END StartFFTTask */
 }
 
 /**
