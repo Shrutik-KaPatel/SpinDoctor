@@ -60,6 +60,7 @@ osThreadId DHT11TaskHandle;
 osThreadId WatchdogTaskHandle;
 osThreadId FFTTaskHandle;
 osMutexId diagnosticsMutexHandle;
+osMutexId printfMutexHandle;
 osSemaphoreId uartTxSemaphoreHandle;
 osSemaphoreId fftDataReadySemaphoreHandle;
 /* USER CODE BEGIN PV */
@@ -168,6 +169,12 @@ int main(void)
     LIS3_WriteReg(&hlis, LIS3_CTRL_REG3, LIS3_CTRL_REG3_DRDY_INT1);   /* NEW: routes DRDY to INT1/PE0, without
                                                                         this the chip never pulses PE0 and
                                                                         no EXTI interrupt ever fires */
+    /* Enable the DWT cycle counter. Required by delay_us() and DHT11's
+         * bit-timing. Missing since Session 8 cleanup, silently hangs
+         * DHT11Task forever without it, no crash, just permanently stuck. */
+        DEM_CR |= (1 << 24);
+        DWT_CYCCNT = 0;
+        DWT_CTRL |= 1;
 
     /* Start ADC1 in DMA circular mode. From this point the DMA keeps
      * adc_temp_raw updated automatically on every completed conversion,
@@ -185,6 +192,10 @@ int main(void)
   /* definition and creation of diagnosticsMutex */
   osMutexDef(diagnosticsMutex);
   diagnosticsMutexHandle = osMutexCreate(osMutex(diagnosticsMutex));
+
+  /* definition and creation of printfMutex */
+  osMutexDef(printfMutex);
+  printfMutexHandle = osMutexCreate(osMutex(printfMutex));
 
   /* USER CODE BEGIN RTOS_MUTEX */
   /* add mutexes, ... */
@@ -575,7 +586,27 @@ int _write(int file, char *ptr, int len)
 
     return len;
 }
+/* FreeRTOS calls this automatically if stack overflow checking
+ * (Method 2) detects a task has overrun its allocated stack. Uses
+ * direct blocking HAL_UART_Transmit, not printf: the offending
+ * task's stack may already be corrupted, and printf's internal
+ * formatting pushes more onto that same stack, risking further
+ * corruption before the message gets out. */
+void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
+{
+    char msg[64];
+    int len = 0;
+    const char *prefix = "!!! STACK OVERFLOW in task: ";
+    while (prefix[len]) { msg[len] = prefix[len]; len++; }
+    int i = 0;
+    while (pcTaskName[i] && len < 60) { msg[len++] = pcTaskName[i++]; }
+    msg[len++] = '\r';
+    msg[len++] = '\n';
 
+    HAL_UART_Transmit(&huart2, (uint8_t*)msg, len, HAL_MAX_DELAY);
+
+    while(1) { }
+}
 /* HAL calls this automatically once a UART DMA transmit completes.
  * Releasing the semaphore here, not inside _write() itself, is what
  * makes this safe across tasks, the next printf can't start a new
@@ -673,7 +704,6 @@ void StartAccelTask(void const * argument)
 	      if (++print_counter >= 40)
 	      {
 	          print_counter = 0;
-
 	          /* Hold the mutex only as long as it takes to write three
 	           * int16_t values, a handful of microseconds, then release
 	           * immediately. Never hold a mutex across something slow like
@@ -685,7 +715,9 @@ void StartAccelTask(void const * argument)
 	          diagnostics.accel_z = data.z;
 	          osMutexRelease(diagnosticsMutexHandle);
 
+	          osMutexWait(printfMutexHandle, osWaitForever);
 	          printf("X:%d Y:%d Z:%d\r\n", data.x, data.y, data.z);
+	          osMutexRelease(printfMutexHandle);
 	      }
 	  }
     osDelay(1);
@@ -707,27 +739,29 @@ void StartDHT11Task(void const * argument)
   for(;;)
   {
 	  DHT11_Data dht;
-	  if (DHT11_Read(&dht))
-	  {
-	      osMutexWait(diagnosticsMutexHandle, osWaitForever);
-	      diagnostics.humidity_int = dht.humidity_int;
-	      diagnostics.humidity_dec = dht.humidity_dec;
-	      diagnostics.temp_int     = dht.temp_int;
-	      diagnostics.temp_dec     = dht.temp_dec;
-	      osMutexRelease(diagnosticsMutexHandle);
+		  if (DHT11_Read(&dht))
+		  {
+		      osMutexWait(diagnosticsMutexHandle, osWaitForever);
+		      diagnostics.humidity_int = dht.humidity_int;
+		      diagnostics.humidity_dec = dht.humidity_dec;
+		      diagnostics.temp_int     = dht.temp_int;
+		      diagnostics.temp_dec     = dht.temp_dec;
+		      osMutexRelease(diagnosticsMutexHandle);
 
-	      printf("DHT11: %d.%d%% RH, %d.%dC\r\n",
-	             dht.humidity_int, dht.humidity_dec,
-	             dht.temp_int, dht.temp_dec);
-	  }
-	  else
-	  {
-	      printf("DHT11: read failed\r\n");
-	  }
-
-	      osDelay(3000);  /* temperature has no urgency, 3s between reads is plenty,
-	                        * and gives the bus a clean recovery window between
-	                        * 1-wire transactions */
+		      osMutexWait(printfMutexHandle, osWaitForever);
+		      printf("DHT11: %d.%d%% RH, %d.%dC\r\n",
+		             dht.humidity_int, dht.humidity_dec,
+		             dht.temp_int, dht.temp_dec);
+		      osMutexRelease(printfMutexHandle);
+		  }
+		  else
+		  {
+		      osMutexWait(printfMutexHandle, osWaitForever);
+		      printf("DHT11: read failed\r\n");
+		      osMutexRelease(printfMutexHandle);
+		  }
+		      osDelay(3000);  /* temperature has no urgency, 3s between reads is plenty,
+		                        * and gives the bus a clean recovery window between*/
   }
   /* USER CODE END StartDHT11Task */
 }
@@ -742,17 +776,38 @@ void StartDHT11Task(void const * argument)
 void StartWatchdogTask(void const * argument)
 {
   /* USER CODE BEGIN StartWatchdogTask */
-  /* Infinite loop */
-  for(;;)
-  {
-	  /* Refresh every 500ms, comfortably under the 2-second IWDG
+
+	  /* Reset-cause check using DIRECT blocking UART, not printf, so this
+	     * cannot touch any mutex/semaphore and cannot deadlock. Confirming
+	     * whether this pre-FFT baseline resets at all, same instrumentation
+	     * used to isolate the FFT-branch regression earlier today. */
+	    char msg[80];
+	    int len = 0;
+	    if (__HAL_RCC_GET_FLAG(RCC_FLAG_IWDGRST))
+	        len = sprintf(msg, "RESET: IWDG\r\n");
+	    else if (__HAL_RCC_GET_FLAG(RCC_FLAG_LPWRRST))
+	        len = sprintf(msg, "RESET: LOW POWER / BROWNOUT\r\n");
+	    else if (__HAL_RCC_GET_FLAG(RCC_FLAG_PORRST))
+	        len = sprintf(msg, "RESET: POWER-ON\r\n");
+	    else if (__HAL_RCC_GET_FLAG(RCC_FLAG_PINRST))
+	        len = sprintf(msg, "RESET: PIN/NRST\r\n");
+	    else
+	        len = sprintf(msg, "RESET: OTHER/UNKNOWN\r\n");
+	    HAL_UART_Transmit(&huart2, (uint8_t*)msg, len, HAL_MAX_DELAY);
+	    __HAL_RCC_CLEAR_RESET_FLAGS();
+
+	    /* Infinite loop */
+	    for(;;)
+	    {
+	        /* Refresh every 500ms, comfortably under the 2-second IWDG
 	         * window. This task only ever runs if the scheduler is still
 	         * actually switching between tasks, if any task hangs hard
 	         * enough to starve the scheduler entirely, this refresh stops
 	         * happening and IWDG forces a full chip reset within 2 seconds. */
 	        HAL_IWDG_Refresh(&hiwdg);
 	        osDelay(500);
-  }
+	    }
+
   /* USER CODE END StartWatchdogTask */
 }
 
