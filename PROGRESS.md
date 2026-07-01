@@ -184,6 +184,29 @@ No behavioral change yet, this is purely the safe-sharing
 infrastructure landing correctly before anything actually consumes
 the shared struct.
 
+## Session 8
+Replaced blocking HAL_UART_Transmit in _write() with DMA-driven
+HAL_UART_Transmit_DMA, serialized across tasks using a binary
+semaphore (uartTxSemaphore, initialized Available so the first printf
+can proceed immediately without deadlocking). HAL_UART_TxCpltCallback
+releases the semaphore once each transfer completes, preventing a
+second task from starting a new DMA transfer into a buffer still
+being read by a previous one.
+
+Hit a real ordering bug on first flash: _write() was calling
+osSemaphoreWait before the FreeRTOS scheduler had started, since
+the early debug prints in USER CODE BEGIN 2 ran before osKernelStart.
+Semaphore waits are scheduler-dependent and hang silently when called
+pre-kernel, which starved WatchdogTask and triggered repeated IWDG
+resets. Fixed by removing the pre-kernel debug printf calls that were
+leftover from earlier diagnostic work, which was the right cleanup
+anyway. DWT cycle counter enable lines kept since DHT11 depends on
+DWT->CYCCNT for bit-timing.
+
+DHT11 noted as collecting both temperature and humidity but only
+temperature will appear in the eventual ESP32 payload. Humidity
+fields retained in the diagnostics struct but not transmitted.
+
 ## Session 9
 Implemented ping-pong double buffering on the LIS3DSH DMA burst-read
 pipeline. Changed burst_rx_buf from a single 6-byte array to two
@@ -196,3 +219,51 @@ printf) finishes well within the 2.5ms sample window, but this is a
 hard prerequisite for the FFT and NanoEdge inference steps coming
 next, where processing time will meaningfully compete with the 400Hz
 sample rate.
+
+## Session 10
+Added a CMSIS-DSP FFT pipeline to the accelerometer path. Copied the
+CMSIS-DSP library into the project fresh (this project never had it,
+unlike the earlier mini-project bring-up), reusing the exact known-good
+file list from that prior debugging session instead of rediscovering it:
+excluded the whole DSP Source tree by default, restored only
+TransformFunctions (bitreversal, cfft, cfft_init, cfft_radix8,
+rfft_fast, rfft_fast_init), CommonTables (common_tables, const_structs),
+and ComplexMathFunctions (cmplx_mag). Also had to exclude the DSP
+Examples and ComputeLibrary folders entirely, both pulled in
+foreign Cortex-M7/M55/NEON startup files that collided with this
+project's real STM32F407 startup code, a new failure mode not seen in
+the mini-project.
+
+Used arm_rfft_fast_f32 (real FFT, not complex) since accelerometer data
+has no imaginary component, half the compute and half the buffer versus
+the complex FFT used in the mini-project bring-up. Chose N=256 for the
+capstone (versus N=512 in the mini-project) based on real, measured fan
+RPM (900-1400) established earlier: 1.5625Hz bin resolution cleanly
+resolves the expected 15-23Hz fundamental and 45-70Hz blade-pass
+harmonic without the added latency of a larger window.
+
+Architecture: a new dedicated FFTTask, lower priority than AccelTask so
+FFT compute can never delay the time-critical 400Hz sampling path,
+higher priority than DHT11Task/WatchdogTask so it still gets real CPU
+time. AccelTask accumulates raw samples into a block-level ping-pong
+pair of 256-sample buffers per axis (separate from the existing
+single-sample ping-pong in the SPI DMA driver), releases a binary
+semaphore once a window fills, and immediately swaps to the other half
+so accumulation never stalls waiting on FFTTask. FFTTask blocks on that
+semaphore, runs arm_rfft_fast_f32 + arm_cmplx_mag_f32 per axis on wake,
+and finds the peak magnitude bin per axis.
+
+Hit a real bug during wiring: the accumulation and semaphore-release
+logic was initially pasted into the dead while(1) loop in main() (left
+over from before the FreeRTOS retrofit, never actually reachable since
+osKernelStart never returns), instead of into StartAccelTask itself.
+Caught before it caused a silent no-op failure.
+
+Validated fan-on vs fan-off comparison directly: fan-off FFT peaks are
+scattered, low-magnitude noise (1-6Hz, ~1-20k), fan-on peaks are sharp
+and stable, Y-axis at 56.25Hz with magnitude 100k-450k, X/Z at ~114Hz.
+Confirmed this is real mechanical signal, not electrical/DMA artifact,
+since the signal collapses entirely with the fan off. 56.25Hz / 3
+blades = 18.75Hz fundamental = 1125 RPM, sits centered in the
+independently measured 900-1400 RPM range, a strong cross-check that
+the FFT pipeline is producing physically meaningful output.
