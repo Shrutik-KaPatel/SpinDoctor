@@ -58,9 +58,12 @@ DMA_HandleTypeDef hdma_usart2_tx;
 osThreadId AccelTaskHandle;
 osThreadId DHT11TaskHandle;
 osThreadId WatchdogTaskHandle;
+osThreadId CaptureTaskHandle;
 osMutexId diagnosticsMutexHandle;
 osMutexId printfMutexHandle;
 osSemaphoreId uartTxSemaphoreHandle;
+osSemaphoreId captureDataReadyHandle;
+osSemaphoreId captureRxByteReadyHandle;
 /* USER CODE BEGIN PV */
 LIS3_HandleTypeDef hlis;
 LIS3_DataTypeDef   data;
@@ -78,6 +81,31 @@ volatile uint16_t adc_temp_raw;
 #define DEM_CR      (*(volatile uint32_t*)0xE000EDFC)
 
 DiagnosticsData diagnostics = {0};
+
+#define CAPTURE_BUF_SIZE 64   /* samples per axis per buffer, matches
+                                 * original FFT window sizing rationale:
+                                 * enough periods per buffer at expected
+                                 * fan RPM, arbitrary otherwise for raw
+                                 * capture, NanoEdge does its own windowing */
+#define CAPTURE_WINDOW_COUNT 156   /* ~25s at 400Hz / 256-sample windows,
+                                    * matches ST's 20-30s capture guidance
+                                    * from earlier NanoEdge format research */
+
+int16_t capture_buf_x[2][CAPTURE_BUF_SIZE];
+int16_t capture_buf_y[2][CAPTURE_BUF_SIZE];
+int16_t capture_buf_z[2][CAPTURE_BUF_SIZE];
+volatile uint8_t capture_fill_idx = 0;
+volatile uint16_t capture_sample_count = 0;
+volatile uint8_t capture_ready_idx = 0;
+
+/* Set true only while an active capture window is streaming; AccelTask
+ * checks this before bothering to fill the capture buffers or release
+ * the semaphore, so there's zero extra work happening between capture
+ * sessions. */
+volatile uint8_t capture_active = 0;
+
+
+uint8_t uart_rx_byte;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -91,6 +119,7 @@ static void MX_IWDG_Init(void);
 void StartAccelTask(void const * argument);
 void StartDHT11Task(void const * argument);
 void StartWatchdogTask(void const * argument);
+void StartCaptureTask(void const * argument);
 
 /* USER CODE BEGIN PFP */
 
@@ -157,6 +186,13 @@ int main(void)
      * buffer pointer and length (1 element here, one channel only). */
     HAL_ADC_Start_DMA(&hadc1, (uint32_t*)&adc_temp_raw, 1);
 
+    /* Start interrupt-driven UART receive for the capture menu. Blocking/
+     * polling-mode HAL_UART_Receive doesn't coexist safely with DMA-based
+     * TX already active on this same UART (used by printf), it can return
+     * immediately with a busy/error state instead of genuinely blocking.
+     * Interrupt-driven RX avoids that conflict entirely. */
+    HAL_UART_Receive_IT(&huart2, &uart_rx_byte, 1);
+
   /* USER CODE END 2 */
 
   /* Create the mutex(es) */
@@ -177,7 +213,22 @@ int main(void)
   osSemaphoreDef(uartTxSemaphore);
   uartTxSemaphoreHandle = osSemaphoreCreate(osSemaphore(uartTxSemaphore), 1);
 
+  /* definition and creation of captureDataReady */
+  osSemaphoreDef(captureDataReady);
+  captureDataReadyHandle = osSemaphoreCreate(osSemaphore(captureDataReady), 1);
+
+  /* definition and creation of captureRxByteReady */
+  osSemaphoreDef(captureRxByteReady);
+  captureRxByteReadyHandle = osSemaphoreCreate(osSemaphore(captureRxByteReady), 1);
+
   /* USER CODE BEGIN RTOS_SEMAPHORES */
+  /* captureDataReadyHandle is created with 1 token by default in
+   * CMSIS_V1 regardless of the "Available" GUI setting, drain it here
+   * so CaptureTask correctly blocks until AccelTask actually signals a
+   * completed window, rather than running once immediately on boot. */
+  osSemaphoreWait(captureDataReadyHandle, 0);
+
+  osSemaphoreWait(captureRxByteReadyHandle, 0);
   /* add semaphores, ... */
   /* USER CODE END RTOS_SEMAPHORES */
 
@@ -201,6 +252,10 @@ int main(void)
   /* definition and creation of WatchdogTask */
   osThreadDef(WatchdogTask, StartWatchdogTask, osPriorityLow, 0, 128);
   WatchdogTaskHandle = osThreadCreate(osThread(WatchdogTask), NULL);
+
+  /* definition and creation of CaptureTask */
+  osThreadDef(CaptureTask, StartCaptureTask, osPriorityBelowNormal, 0, 512);
+  CaptureTaskHandle = osThreadCreate(osThread(CaptureTask), NULL);
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
@@ -529,16 +584,8 @@ static void MX_GPIO_Init(void)
 /* USER CODE BEGIN 4 */
 int _write(int file, char *ptr, int len)
 {
-    /* Wait until any previous DMA transfer has actually finished,
-     * osWaitForever is fine here since transfers complete in well
-     * under a millisecond, this is never a meaningful stall. Without
-     * this wait, two tasks calling printf close together could start
-     * a second DMA transfer from a different buffer while the first
-     * one is still mid-flight, corrupting output. */
     osSemaphoreWait(uartTxSemaphoreHandle, osWaitForever);
-
     HAL_UART_Transmit_DMA(&huart2, (uint8_t*)ptr, len);
-
     return len;
 }
 /* FreeRTOS calls this automatically if stack overflow checking
@@ -613,6 +660,18 @@ void delay_us(uint32_t us)
     while ((DWT_CYCCNT - start) < cycles) { }
 }
 
+/* HAL calls this automatically once one byte has been received via
+ * HAL_UART_Receive_IT. Releases the semaphore CaptureTask blocks on,
+ * then immediately re-arms itself to listen for the next byte. */
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+    if (huart->Instance == USART2)
+    {
+        osSemaphoreRelease(captureRxByteReadyHandle);
+        HAL_UART_Receive_IT(&huart2, &uart_rx_byte, 1);
+    }
+}
+
 /* USER CODE END 4 */
 
 /* USER CODE BEGIN Header_StartAccelTask */
@@ -625,38 +684,57 @@ void delay_us(uint32_t us)
 void StartAccelTask(void const * argument)
 {
   /* USER CODE BEGIN 5 */
-  /* Infinite loop */
-  for(;;)
-  {
-	  /* Nothing blocking here anymore. DRDY interrupt -> DMA burst read
-	    * runs entirely on its own; this loop just checks the flag the
-	    * library sets once a fresh sample has actually landed. */
-	  if (LIS3_DataReady)
+	 for(;;)
 	  {
-	      LIS3_DataReady = 0;
-
-	      static uint16_t print_counter = 0;
-	      if (++print_counter >= 40)
+	      if (LIS3_DataReady)
 	      {
-	          print_counter = 0;
-	          /* Hold the mutex only as long as it takes to write three
-	           * int16_t values, a handful of microseconds, then release
-	           * immediately. Never hold a mutex across something slow like
-	           * a printf call, that would needlessly block DHT11Task or
-	           * anything else waiting on the same lock. */
-	          osMutexWait(diagnosticsMutexHandle, osWaitForever);
-	          diagnostics.accel_x = data.x;
-	          diagnostics.accel_y = data.y;
-	          diagnostics.accel_z = data.z;
-	          osMutexRelease(diagnosticsMutexHandle);
+	          LIS3_DataReady = 0;
 
-	          osMutexWait(printfMutexHandle, osWaitForever);
-	          printf("X:%d Y:%d Z:%d\r\n", data.x, data.y, data.z);
-	          osMutexRelease(printfMutexHandle);
+	          /* Capture buffer fill happens on EVERY sample, unconditional
+	           * on print_counter, since the capture buffer needs the real
+	           * 400Hz stream, not a throttled/sparse subset. Gated only by
+	           * capture_active so this costs nothing between capture
+	           * sessions. */
+	          if (capture_active)
+	          {
+
+	        	  capture_buf_x[capture_fill_idx][capture_sample_count] = data.x;
+ 	              capture_buf_y[capture_fill_idx][capture_sample_count] = data.y;
+ 	              capture_buf_z[capture_fill_idx][capture_sample_count] = data.z;
+ 	              capture_sample_count++;
+
+	              if (capture_sample_count >= CAPTURE_BUF_SIZE)
+	              {
+	                  capture_ready_idx = capture_fill_idx;
+	                  capture_fill_idx = 1 - capture_fill_idx;
+	                  capture_sample_count = 0;
+	                  osSemaphoreRelease(captureDataReadyHandle);
+	              }
+	          }
+	          else
+	          {
+	              /* Normal throttled diagnostic print, only when NOT
+	               * capturing, keeps the UART stream clean and parseable
+	               * during an active capture window. */
+	              static uint16_t print_counter = 0;
+	              if (++print_counter >= 40)
+	              {
+	                  print_counter = 0;
+
+	                  osMutexWait(diagnosticsMutexHandle, osWaitForever);
+	                  diagnostics.accel_x = data.x;
+	                  diagnostics.accel_y = data.y;
+	                  diagnostics.accel_z = data.z;
+	                  osMutexRelease(diagnosticsMutexHandle);
+
+	                  osMutexWait(printfMutexHandle, osWaitForever);
+	                  printf("X:%d Y:%d Z:%d\r\n", data.x, data.y, data.z);
+	                  osMutexRelease(printfMutexHandle);
+	              }
+	          }
 	      }
+	    osDelay(1);
 	  }
-    osDelay(1);
-  }
   /* USER CODE END 5 */
 }
 
@@ -673,30 +751,32 @@ void StartDHT11Task(void const * argument)
   /* Infinite loop */
   for(;;)
   {
-	  DHT11_Data dht;
-		  if (DHT11_Read(&dht))
-		  {
-		      osMutexWait(diagnosticsMutexHandle, osWaitForever);
-		      diagnostics.humidity_int = dht.humidity_int;
-		      diagnostics.humidity_dec = dht.humidity_dec;
-		      diagnostics.temp_int     = dht.temp_int;
-		      diagnostics.temp_dec     = dht.temp_dec;
-		      osMutexRelease(diagnosticsMutexHandle);
+	  if (!capture_active)
+	      {
+	          DHT11_Data dht;
+	          if (DHT11_Read(&dht))
+	          {
+	              osMutexWait(diagnosticsMutexHandle, osWaitForever);
+	              diagnostics.humidity_int = dht.humidity_int;
+	              diagnostics.humidity_dec = dht.humidity_dec;
+	              diagnostics.temp_int     = dht.temp_int;
+	              diagnostics.temp_dec     = dht.temp_dec;
+	              osMutexRelease(diagnosticsMutexHandle);
 
-		      osMutexWait(printfMutexHandle, osWaitForever);
-		      printf("DHT11: %d.%d%% RH, %d.%dC\r\n",
-		             dht.humidity_int, dht.humidity_dec,
-		             dht.temp_int, dht.temp_dec);
-		      osMutexRelease(printfMutexHandle);
-		  }
-		  else
-		  {
-		      osMutexWait(printfMutexHandle, osWaitForever);
-		      printf("DHT11: read failed\r\n");
-		      osMutexRelease(printfMutexHandle);
-		  }
-		      osDelay(3000);  /* temperature has no urgency, 3s between reads is plenty,
-		                        * and gives the bus a clean recovery window between*/
+	              osMutexWait(printfMutexHandle, osWaitForever);
+	              printf("DHT11: %d.%d%% RH, %d.%dC\r\n",
+	                     dht.humidity_int, dht.humidity_dec,
+	                     dht.temp_int, dht.temp_dec);
+	              osMutexRelease(printfMutexHandle);
+	          }
+	          else
+	          {
+	              osMutexWait(printfMutexHandle, osWaitForever);
+	              printf("DHT11: read failed\r\n");
+	              osMutexRelease(printfMutexHandle);
+	          }
+	      }
+	      osDelay(3000);
   }
   /* USER CODE END StartDHT11Task */
 }
@@ -744,6 +824,129 @@ void StartWatchdogTask(void const * argument)
 	    }
 
   /* USER CODE END StartWatchdogTask */
+}
+
+/* USER CODE BEGIN Header_StartCaptureTask */
+/**
+* @brief Function implementing the CaptureTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartCaptureTask */
+void StartCaptureTask(void const * argument)
+{
+  /* USER CODE BEGIN StartCaptureTask */
+	 uint8_t rx_byte;
+	  char speed_char = 0;
+	  char class_char = 0;
+
+	  for(;;)
+	  {
+	      /* --- Menu: prompt for speed + class --- */
+		  osMutexWait(printfMutexHandle, osWaitForever);
+		  printf("\r\n=== SpinDoctor Capture Menu ===\r\n");
+		  printf("Speed:  1) Low  2) Medium  3) High\r\n");
+		  printf("Class:  H) Healthy  I) Imbalance  O) Obstruction\r\n");
+		  printf("Enter as two chars, e.g. \"1H\": ");
+		  osMutexRelease(printfMutexHandle);
+
+	      /* Blocking receive, one byte at a time. This task has nothing
+	       * else to do while waiting for menu input, so a simple blocking
+	       * HAL_UART_Receive call here is fine, no interrupt/queue needed. */
+		  osSemaphoreWait(captureRxByteReadyHandle, osWaitForever);
+		  rx_byte = uart_rx_byte;
+	      speed_char = (char)rx_byte;
+	      osSemaphoreWait(captureRxByteReadyHandle, osWaitForever);
+	      rx_byte = uart_rx_byte;
+	      class_char = (char)rx_byte;
+
+	      uint8_t valid_speed = (speed_char == '1' || speed_char == '2' || speed_char == '3');
+	      uint8_t valid_class = (class_char == 'H' || class_char == 'I' || class_char == 'O' ||
+	                              class_char == 'h' || class_char == 'i' || class_char == 'o');
+
+	      if (!valid_speed || !valid_class)
+	      {
+	          osMutexWait(printfMutexHandle, osWaitForever);
+	          printf("\r\nInvalid input, try again.\r\n");
+	          osMutexRelease(printfMutexHandle);
+	          continue;
+	      }
+
+	      const char *class_name;
+	      switch (class_char)
+	      {
+	          case 'H': case 'h': class_name = "healthy";    break;
+	          case 'I': case 'i': class_name = "imbalance";  break;
+	          default:            class_name = "obstruction"; break;
+	      }
+	      char label[32];
+	      sprintf(label, "speed%c_%s", speed_char, class_name);
+
+	      osMutexWait(printfMutexHandle, osWaitForever);
+	      printf("\r\nSelected: Speed %c, %s. Set up the fan now.\r\n", speed_char, class_name);
+	      printf("Send 'S' when stable and ready to capture, 'X' to cancel and return to menu.\r\n");
+	      osMutexRelease(printfMutexHandle);
+
+	      char cmd;
+	      do
+	      {
+	    	  osSemaphoreWait(captureRxByteReadyHandle, osWaitForever);
+	    	     cmd = (char)uart_rx_byte;
+	      } while (cmd != 'S' && cmd != 's' && cmd != 'X' && cmd != 'x');
+
+	      if (cmd == 'X' || cmd == 'x')
+	      {
+	          osMutexWait(printfMutexHandle, osWaitForever);
+	          printf("\r\nCancelled, returning to menu.\r\n");
+	          osMutexRelease(printfMutexHandle);
+	          continue;
+	      }
+
+	      /* --- Active capture --- */
+	      osMutexWait(printfMutexHandle, osWaitForever);
+	      printf("\r\n=== CAPTURE START: %s ===\r\n", label);
+	      osMutexRelease(printfMutexHandle);
+
+	      osSemaphoreWait(captureDataReadyHandle, 0);
+	      capture_fill_idx = 0;
+	      capture_sample_count = 0;
+	      capture_active = 1;
+
+	      for (int w = 0; w < CAPTURE_WINDOW_COUNT; w++)
+	      {
+	          osSemaphoreWait(captureDataReadyHandle, osWaitForever);
+	          uint8_t idx = capture_ready_idx;
+
+	          static char row_buf[3][6000];
+	                   static uint8_t row_buf_idx = 0;
+
+	                   int pos = 0;
+	                   for (int i = 0; i < CAPTURE_BUF_SIZE; i++)
+	                   {
+	                       pos += sprintf(row_buf[row_buf_idx] + pos, "%d,%d,%d",
+	                                      capture_buf_x[idx][i],
+	                                      capture_buf_y[idx][i],
+	                                      capture_buf_z[idx][i]);
+	                       if (i < CAPTURE_BUF_SIZE - 1) row_buf[row_buf_idx][pos++] = ',';
+	                   }
+	                   row_buf[row_buf_idx][pos++] = '\r';
+	                   row_buf[row_buf_idx][pos++] = '\n';
+	                   row_buf[row_buf_idx][pos] = '\0';
+
+	                   osMutexWait(printfMutexHandle, osWaitForever);
+	                   printf("%s", row_buf[row_buf_idx]);
+	                   osMutexRelease(printfMutexHandle);
+
+	                   row_buf_idx = (row_buf_idx + 1) % 3;
+	      }
+
+	      capture_active = 0;
+
+	      osMutexWait(printfMutexHandle, osWaitForever);
+	      printf("=== CAPTURE END: %s ===\r\n", label);
+	      osMutexRelease(printfMutexHandle);
+	  }
+  /* USER CODE END StartCaptureTask */
 }
 
 /**
