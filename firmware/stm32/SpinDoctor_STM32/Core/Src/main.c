@@ -486,7 +486,7 @@ static void MX_USART2_UART_Init(void)
 
   /* USER CODE END USART2_Init 1 */
   huart2.Instance = USART2;
-  huart2.Init.BaudRate = 115200;
+  huart2.Init.BaudRate = 460800;
   huart2.Init.WordLength = UART_WORDLENGTH_8B;
   huart2.Init.StopBits = UART_STOPBITS_1;
   huart2.Init.Parity = UART_PARITY_NONE;
@@ -917,7 +917,7 @@ void StartCaptureTask(void const * argument)
 	          osSemaphoreWait(captureDataReadyHandle, osWaitForever);
 	          uint8_t idx = capture_ready_idx;
 
-	          static char row_buf[3][6000];
+	          static char row_buf[4][6000];
 	                   static uint8_t row_buf_idx = 0;
 
 	                   int pos = 0;
@@ -933,11 +933,24 @@ void StartCaptureTask(void const * argument)
 	                   row_buf[row_buf_idx][pos++] = '\n';
 	                   row_buf[row_buf_idx][pos] = '\0';
 
-	                   osMutexWait(printfMutexHandle, osWaitForever);
-	                   printf("%s", row_buf[row_buf_idx]);
-	                   osMutexRelease(printfMutexHandle);
+	                   uint32_t t_start = DWT_CYCCNT;
 
-	                   row_buf_idx = (row_buf_idx + 1) % 3;
+	                             osMutexWait(printfMutexHandle, osWaitForever);
+	                             printf("%s", row_buf[row_buf_idx]);
+	                             osMutexRelease(printfMutexHandle);
+
+	                             uint32_t t_elapsed_us = (DWT_CYCCNT - t_start) / (SystemCoreClock / 1000000);
+
+	                             static uint16_t dbg_counter = 0;
+	                             if (++dbg_counter >= 20)
+	                             {
+	                                 dbg_counter = 0;
+	                                 osMutexWait(printfMutexHandle, osWaitForever);
+	                                 printf("[row took %luus]\r\n", (unsigned long)t_elapsed_us);
+	                                 osMutexRelease(printfMutexHandle);
+	                             }
+
+	                             row_buf_idx = (row_buf_idx + 1) % 4;
 	      }
 
 	      capture_active = 0;
