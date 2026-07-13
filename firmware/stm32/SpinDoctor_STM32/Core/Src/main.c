@@ -90,9 +90,9 @@ DiagnosticsData diagnostics = {0};
                                  * enough periods per buffer at expected
                                  * fan RPM, arbitrary otherwise for raw
                                  * capture, NanoEdge does its own windowing */
-#define CAPTURE_WINDOW_COUNT 156   /* ~25s at 400Hz / 256-sample windows,
-                                    * matches ST's 20-30s capture guidance
-                                    * from earlier NanoEdge format research */
+#define CAPTURE_WINDOW_COUNT 350   /* ~56s at 400Hz / 64-sample windows,
+ 	 	 	 	 	 	 	 	 	 * bumped from 156 to give NanoEdge more
+ 	 	 	 	 	 	 	 	 	 * examples of speed1_healthy specifically */
 
 int16_t capture_buf_x[2][CAPTURE_BUF_SIZE];
 int16_t capture_buf_y[2][CAPTURE_BUF_SIZE];
@@ -256,15 +256,15 @@ int main(void)
 
   /* Create the thread(s) */
   /* definition and creation of AccelTask */
-  osThreadDef(AccelTask, StartAccelTask, osPriorityNormal, 0, 128);
+  osThreadDef(AccelTask, StartAccelTask, osPriorityNormal, 0, 512);
   AccelTaskHandle = osThreadCreate(osThread(AccelTask), NULL);
 
   /* definition and creation of DHT11Task */
-  osThreadDef(DHT11Task, StartDHT11Task, osPriorityLow, 0, 128);
+  osThreadDef(DHT11Task, StartDHT11Task, osPriorityLow, 0, 256);
   DHT11TaskHandle = osThreadCreate(osThread(DHT11Task), NULL);
 
   /* definition and creation of WatchdogTask */
-  osThreadDef(WatchdogTask, StartWatchdogTask, osPriorityLow, 0, 128);
+  osThreadDef(WatchdogTask, StartWatchdogTask, osPriorityLow, 0, 512);
   WatchdogTaskHandle = osThreadCreate(osThread(WatchdogTask), NULL);
 
   /* definition and creation of CaptureTask */
@@ -272,10 +272,16 @@ int main(void)
   CaptureTaskHandle = osThreadCreate(osThread(CaptureTask), NULL);
 
   /* definition and creation of InferenceTask */
-  osThreadDef(InferenceTask, StartInferenceTask, osPriorityBelowNormal, 0, 256);
+  osThreadDef(InferenceTask, StartInferenceTask, osPriorityBelowNormal, 0, 1024);
   InferenceTaskHandle = osThreadCreate(osThread(InferenceTask), NULL);
 
   /* USER CODE BEGIN RTOS_THREADS */
+  if (AccelTaskHandle == NULL)     { HAL_UART_Transmit(&huart2, (uint8_t*)"AccelTask FAILED\r\n", 18, HAL_MAX_DELAY); }
+  if (DHT11TaskHandle == NULL)     { HAL_UART_Transmit(&huart2, (uint8_t*)"DHT11Task FAILED\r\n", 18, HAL_MAX_DELAY); }
+  if (WatchdogTaskHandle == NULL)  { HAL_UART_Transmit(&huart2, (uint8_t*)"WatchdogTask FAILED\r\n", 21, HAL_MAX_DELAY); }
+  if (CaptureTaskHandle == NULL)   { HAL_UART_Transmit(&huart2, (uint8_t*)"CaptureTask FAILED\r\n", 20, HAL_MAX_DELAY); }
+  if (InferenceTaskHandle == NULL) { HAL_UART_Transmit(&huart2, (uint8_t*)"InferenceTask FAILED\r\n", 22, HAL_MAX_DELAY); }
+
   /* add threads, ... */
   /* USER CODE END RTOS_THREADS */
 
@@ -288,33 +294,7 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-	  /* Nothing blocking here anymore. DRDY interrupt -> DMA burst read
-   * runs entirely on its own; this loop just checks the flag the
-   * library sets once a fresh sample has actually landed. */
-	  if (LIS3_DataReady)
-	  {
-	      LIS3_DataReady = 0;
 
-	      static uint16_t print_counter = 0;
-	      if (++print_counter >= 40)   /* ~10 prints/sec at 400Hz ODR, readable */
-	      {
-	          print_counter = 0;
-	          printf("X:%d Y:%d Z:%d\r\n", data.x, data.y, data.z);
-
-	          DHT11_Data dht;
-	          if (DHT11_Read(&dht))
-	          {
-	              printf("DHT11: %d.%d%% RH, %d.%dC\r\n",
-	                     dht.humidity_int, dht.humidity_dec,
-	                     dht.temp_int, dht.temp_dec);
-	          }
-	          else
-	          {
-	              printf("DHT11: read failed\r\n");
-	          }
-
-	      }
-	  }
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -603,7 +583,28 @@ static void MX_GPIO_Init(void)
 int _write(int file, char *ptr, int len)
 {
     osSemaphoreWait(uartTxSemaphoreHandle, osWaitForever);
-    HAL_UART_Transmit_DMA(&huart2, (uint8_t*)ptr, len);
+
+    HAL_StatusTypeDef status = HAL_UART_Transmit_DMA(&huart2, (uint8_t*)ptr, len);
+    if (status != HAL_OK)
+    {
+        /* DMA transfer never actually started, don't wait for a callback
+         * that will never fire. Release immediately and bail. */
+        osSemaphoreRelease(uartTxSemaphoreHandle);
+        return 0;
+    }
+
+    /* Bounded wait instead of osWaitForever, so a stuck transfer surfaces
+     * as a dropped line instead of a silent whole-system freeze. */
+    osStatus wait_result = osSemaphoreWait(uartTxSemaphoreHandle, 200);
+    if (wait_result != osOK)
+    {
+        /* Transfer never completed within 200ms, something is stuck.
+         * Don't propagate the hang further, release and move on. */
+        osSemaphoreRelease(uartTxSemaphoreHandle);
+        return 0;
+    }
+
+    osSemaphoreRelease(uartTxSemaphoreHandle);
     return len;
 }
 /* FreeRTOS calls this automatically if stack overflow checking
@@ -766,6 +767,9 @@ void StartAccelTask(void const * argument)
 void StartDHT11Task(void const * argument)
 {
   /* USER CODE BEGIN StartDHT11Task */
+	 osDelay(3000);   /* let power rails and the sensor itself settle before
+	                       the very first 1-Wire transaction; avoids racing
+	                       boot-time GPIO/timing edge cases */
   /* Infinite loop */
   for(;;)
   {
@@ -810,23 +814,21 @@ void StartWatchdogTask(void const * argument)
 {
   /* USER CODE BEGIN StartWatchdogTask */
 
-	  /* Reset-cause check using DIRECT blocking UART, not printf, so this
-	     * cannot touch any mutex/semaphore and cannot deadlock. Confirming
-	     * whether this pre-FFT baseline resets at all, same instrumentation
-	     * used to isolate the FFT-branch regression earlier today. */
-	    char msg[80];
-	    int len = 0;
+	  /* Reset-cause check, printed once at boot so we can tell whether the
+	   * last reset was a normal power-on, a manual reset, or the IWDG
+	   * catching a genuine freeze elsewhere in the system. */
+	    osMutexWait(printfMutexHandle, osWaitForever);
 	    if (__HAL_RCC_GET_FLAG(RCC_FLAG_IWDGRST))
-	        len = sprintf(msg, "RESET: IWDG\r\n");
+	        printf("RESET: IWDG\r\n");
 	    else if (__HAL_RCC_GET_FLAG(RCC_FLAG_LPWRRST))
-	        len = sprintf(msg, "RESET: LOW POWER / BROWNOUT\r\n");
+	        printf("RESET: LOW POWER / BROWNOUT\r\n");
 	    else if (__HAL_RCC_GET_FLAG(RCC_FLAG_PORRST))
-	        len = sprintf(msg, "RESET: POWER-ON\r\n");
+	        printf("RESET: POWER-ON\r\n");
 	    else if (__HAL_RCC_GET_FLAG(RCC_FLAG_PINRST))
-	        len = sprintf(msg, "RESET: PIN/NRST\r\n");
+	        printf("RESET: PIN/NRST\r\n");
 	    else
-	        len = sprintf(msg, "RESET: OTHER/UNKNOWN\r\n");
-	    HAL_UART_Transmit(&huart2, (uint8_t*)msg, len, HAL_MAX_DELAY);
+	        printf("RESET: OTHER/UNKNOWN\r\n");
+	    osMutexRelease(printfMutexHandle);
 	    __HAL_RCC_CLEAR_RESET_FLAGS();
 
 	    /* Infinite loop */
@@ -862,10 +864,10 @@ void StartCaptureTask(void const * argument)
 	  {
 	      /* --- Menu: prompt for speed + class --- */
 		  osMutexWait(printfMutexHandle, osWaitForever);
-		  printf("\r\n=== SpinDoctor Capture Menu ===\r\n");
-		  printf("Speed:  1) Low  2) Medium  3) High\r\n");
-		  printf("Class:  H) Healthy  I) Imbalance  O) Obstruction\r\n");
-		  printf("Enter as two chars, e.g. \"1H\": ");
+		  printf("\r\n=== SpinDoctor Capture Menu ===\r\n"
+		         "Speed:  1) Low  2) Medium  3) High\r\n"
+		         "Class:  H) Healthy  I) Imbalance  O) Obstruction\r\n"
+		         "Enter as two chars, e.g. \"1H\": ");
 		  osMutexRelease(printfMutexHandle);
 
 	      /* Blocking receive, one byte at a time. This task has nothing
@@ -901,8 +903,9 @@ void StartCaptureTask(void const * argument)
 	      sprintf(label, "speed%c_%s", speed_char, class_name);
 
 	      osMutexWait(printfMutexHandle, osWaitForever);
-	      printf("\r\nSelected: Speed %c, %s. Set up the fan now.\r\n", speed_char, class_name);
-	      printf("Send 'S' when stable and ready to capture, 'X' to cancel and return to menu.\r\n");
+	      printf("\r\nSelected: Speed %c, %s. Set up the fan now.\r\n"
+	             "Send 'S' when stable and ready to capture, 'X' to cancel and return to menu.\r\n",
+	             speed_char, class_name);
 	      osMutexRelease(printfMutexHandle);
 
 	      char cmd;
