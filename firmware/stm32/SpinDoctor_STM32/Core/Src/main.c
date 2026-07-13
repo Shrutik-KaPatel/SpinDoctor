@@ -25,6 +25,8 @@
 #include <stdio.h>
 #include <LIS3DSHTR.h>
 #include "DHT11.h"
+#include "NanoEdgeAI.h"
+
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -59,6 +61,7 @@ osThreadId AccelTaskHandle;
 osThreadId DHT11TaskHandle;
 osThreadId WatchdogTaskHandle;
 osThreadId CaptureTaskHandle;
+osThreadId InferenceTaskHandle;
 osMutexId diagnosticsMutexHandle;
 osMutexId printfMutexHandle;
 osSemaphoreId uartTxSemaphoreHandle;
@@ -120,6 +123,7 @@ void StartAccelTask(void const * argument);
 void StartDHT11Task(void const * argument);
 void StartWatchdogTask(void const * argument);
 void StartCaptureTask(void const * argument);
+void StartInferenceTask(void const * argument);
 
 /* USER CODE BEGIN PFP */
 
@@ -193,6 +197,16 @@ int main(void)
      * Interrupt-driven RX avoids that conflict entirely. */
     HAL_UART_Receive_IT(&huart2, &uart_rx_byte, 1);
 
+    /* Initialize the NanoEdge AI classification model, loading the
+     * pretrained SVM library generated from today's benchmark. Must be
+     * called once before any neai_classification() calls. */
+    enum neai_state neai_init_state = neai_classification_init();
+    if (neai_init_state != NEAI_OK)
+    {
+        /* If the model fails to load, halt here rather than silently
+         * running with an uninitialized classifier. */
+        Error_Handler();
+    }
   /* USER CODE END 2 */
 
   /* Create the mutex(es) */
@@ -256,6 +270,10 @@ int main(void)
   /* definition and creation of CaptureTask */
   osThreadDef(CaptureTask, StartCaptureTask, osPriorityBelowNormal, 0, 512);
   CaptureTaskHandle = osThreadCreate(osThread(CaptureTask), NULL);
+
+  /* definition and creation of InferenceTask */
+  osThreadDef(InferenceTask, StartInferenceTask, osPriorityBelowNormal, 0, 256);
+  InferenceTaskHandle = osThreadCreate(osThread(InferenceTask), NULL);
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
@@ -486,7 +504,7 @@ static void MX_USART2_UART_Init(void)
 
   /* USER CODE END USART2_Init 1 */
   huart2.Instance = USART2;
-  huart2.Init.BaudRate = 460800;
+  huart2.Init.BaudRate = 115200;
   huart2.Init.WordLength = UART_WORDLENGTH_8B;
   huart2.Init.StopBits = UART_STOPBITS_1;
   huart2.Init.Parity = UART_PARITY_NONE;
@@ -684,57 +702,57 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 void StartAccelTask(void const * argument)
 {
   /* USER CODE BEGIN 5 */
-	 for(;;)
-	  {
-	      if (LIS3_DataReady)
-	      {
-	          LIS3_DataReady = 0;
+	for(;;)
+		  {
+		      if (LIS3_DataReady)
+		      {
+		          LIS3_DataReady = 0;
 
-	          /* Capture buffer fill happens on EVERY sample, unconditional
-	           * on print_counter, since the capture buffer needs the real
-	           * 400Hz stream, not a throttled/sparse subset. Gated only by
-	           * capture_active so this costs nothing between capture
-	           * sessions. */
-	          if (capture_active)
-	          {
+		          /* Buffer fill and semaphore release now happen on EVERY
+		           * sample unconditionally, not just during a training
+		           * capture. InferenceTask needs a continuous stream of
+		           * windows during normal operation to do live classification;
+		           * CaptureTask needs the same stream during a capture
+		           * session. capture_active now only controls whether the
+		           * throttled diagnostic X:Y:Z line also prints, it no longer
+		           * gates whether data flows into the shared buffer at all. */
+		          capture_buf_x[capture_fill_idx][capture_sample_count] = data.x;
+		          capture_buf_y[capture_fill_idx][capture_sample_count] = data.y;
+		          capture_buf_z[capture_fill_idx][capture_sample_count] = data.z;
+		          capture_sample_count++;
 
-	        	  capture_buf_x[capture_fill_idx][capture_sample_count] = data.x;
- 	              capture_buf_y[capture_fill_idx][capture_sample_count] = data.y;
- 	              capture_buf_z[capture_fill_idx][capture_sample_count] = data.z;
- 	              capture_sample_count++;
+		          if (capture_sample_count >= CAPTURE_BUF_SIZE)
+		          {
+		              capture_ready_idx = capture_fill_idx;
+		              capture_fill_idx = 1 - capture_fill_idx;
+		              capture_sample_count = 0;
+		              osSemaphoreRelease(captureDataReadyHandle);
+		          }
 
-	              if (capture_sample_count >= CAPTURE_BUF_SIZE)
-	              {
-	                  capture_ready_idx = capture_fill_idx;
-	                  capture_fill_idx = 1 - capture_fill_idx;
-	                  capture_sample_count = 0;
-	                  osSemaphoreRelease(captureDataReadyHandle);
-	              }
-	          }
-	          else
-	          {
-	              /* Normal throttled diagnostic print, only when NOT
-	               * capturing, keeps the UART stream clean and parseable
-	               * during an active capture window. */
-	              static uint16_t print_counter = 0;
-	              if (++print_counter >= 40)
-	              {
-	                  print_counter = 0;
+		          if (!capture_active)
+		          {
+		              /* Normal throttled diagnostic print, only when NOT
+		               * capturing, keeps the UART stream clean and parseable
+		               * during an active capture window. */
+		              static uint16_t print_counter = 0;
+		              if (++print_counter >= 40)
+		              {
+		                  print_counter = 0;
 
-	                  osMutexWait(diagnosticsMutexHandle, osWaitForever);
-	                  diagnostics.accel_x = data.x;
-	                  diagnostics.accel_y = data.y;
-	                  diagnostics.accel_z = data.z;
-	                  osMutexRelease(diagnosticsMutexHandle);
+		                  osMutexWait(diagnosticsMutexHandle, osWaitForever);
+		                  diagnostics.accel_x = data.x;
+		                  diagnostics.accel_y = data.y;
+		                  diagnostics.accel_z = data.z;
+		                  osMutexRelease(diagnosticsMutexHandle);
 
-	                  osMutexWait(printfMutexHandle, osWaitForever);
-	                  printf("X:%d Y:%d Z:%d\r\n", data.x, data.y, data.z);
-	                  osMutexRelease(printfMutexHandle);
-	              }
-	          }
-	      }
-	    osDelay(1);
-	  }
+		                  osMutexWait(printfMutexHandle, osWaitForever);
+		                  printf("X:%d Y:%d Z:%d\r\n", data.x, data.y, data.z);
+		                  osMutexRelease(printfMutexHandle);
+		              }
+		          }
+		      }
+		    osDelay(1);
+		  }
   /* USER CODE END 5 */
 }
 
@@ -960,6 +978,59 @@ void StartCaptureTask(void const * argument)
 	      osMutexRelease(printfMutexHandle);
 	  }
   /* USER CODE END StartCaptureTask */
+}
+
+/* USER CODE BEGIN Header_StartInferenceTask */
+/**
+* @brief Function implementing the InferenceTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartInferenceTask */
+void StartInferenceTask(void const * argument)
+{
+  /* USER CODE BEGIN StartInferenceTask */
+	float input_signal[NEAI_INPUT_SIGNAL_LENGTH * NEAI_INPUT_AXIS_NUMBER];
+	  float probabilities[NEAI_NUMBER_OF_CLASSES];
+	  int id_class;
+	  enum neai_state state;
+
+	  for(;;)
+	  {
+	      osSemaphoreWait(captureDataReadyHandle, osWaitForever);
+
+	      /* Only run inference when NOT in an active training capture
+	       * session. CaptureTask and InferenceTask share the same
+	       * capture-buffer/semaphore pair; during a capture, CaptureTask
+	       * owns that data exclusively (streaming it for NanoEdge Studio
+	       * training), so InferenceTask must skip processing to avoid
+	       * silently splitting windows between the two consumers. */
+	      if (capture_active)
+	      {
+	          continue;
+	      }
+
+	      uint8_t idx = capture_ready_idx;
+
+	      for (int i = 0; i < CAPTURE_BUF_SIZE; i++)
+	      {
+	          input_signal[i * 3 + 0] = (float)capture_buf_x[idx][i];
+	          input_signal[i * 3 + 1] = (float)capture_buf_y[idx][i];
+	          input_signal[i * 3 + 2] = (float)capture_buf_z[idx][i];
+	      }
+
+	      state = neai_classification(input_signal, probabilities, &id_class);
+
+	      if (state == NEAI_OK)
+	      {
+	          osMutexWait(printfMutexHandle, osWaitForever);
+	          printf("Fault class: %s (%.1f%%)\r\n",
+	                 neai_get_class_name(id_class),
+	                 probabilities[id_class] * 100.0f);
+	          osMutexRelease(printfMutexHandle);
+	      }
+	  }
+  /* USER CODE END StartInferenceTask */
 }
 
 /**
