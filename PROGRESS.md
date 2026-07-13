@@ -196,3 +196,39 @@ printf) finishes well within the 2.5ms sample window, but this is a
 hard prerequisite for the FFT and NanoEdge inference steps coming
 next, where processing time will meaningfully compete with the 400Hz
 sample rate.
+
+##Session 10
+Built a full CMSIS-DSP FFT pipeline on top of the ping-pong accelerometer buffers, intended to validate that the sensor was picking up genuine mechanical signal before committing to NanoEdge for classification. Confirmed a real, independently-verifiable result: a clear peak at the fan's actual blade-pass frequency, matching separately-measured RPM.
+
+The FFT branch introduced an intermittent reset bug that took a full session of systematic elimination to isolate, rather than guessing at fixes. Once isolated, made the call to abandon the FFT branch entirely rather than keep debugging it: NanoEdge does its own frequency-domain feature extraction internally, so the FFT output was never actually needed downstream. Reset main back to a pre-FFT commit via git bisect rather than trying to cherry-pick around the regression.
+
+##Session 11
+Hardened the pre-FFT baseline before moving into real data collection. Fixed a real, silent bug found during the FFT debugging arc: DHT11Task hanging forever with no crash, traced to a missing DWT cycle counter enable, delay_us() and DHT11's bit-timing depend on it entirely and it had been dropped in an earlier cleanup pass.
+
+Added printfMutex to serialize printf() calls across tasks, after confirming newlib's internal formatting state isn't reentrant, two tasks calling printf near-simultaneously were producing corrupted, fused output. Added a full hard fault handler with register dump (PC, LR, PSR, R0-R3, R12, CFSR) over direct blocking UART, deliberately not printf, so a corrupted-stack fault can still get a diagnostic out. Added stack overflow detection (FreeRTOS Method 2) with a safe UART-only hook, this hook would end up being the single most important piece of instrumentation in the project several sessions later. Added reset-cause diagnostics (IWDG/brownout/power-on/pin/other) printed once at boot, also direct blocking UART by design.
+
+##Session 12
+Built the menu-driven UART capture system: send two characters (speed 1-3, class H/I/O) to select a target, send S to begin, then stream ~25 seconds of raw 3-axis buffers as CSV rows for NanoEdge Studio's live import.
+
+Hit a serious UART DMA race condition once real capture volume started flowing: printf via DMA takes real transfer time, and the 400Hz accelerometer fill rate can produce data faster than a single row buffer can safely be reused for the next row while the previous one is still transmitting. Root-caused and fixed with a 4-way row-buffer ping-pong (a buffer being transmitted is never the same one AccelTask/CaptureTask writes into next) plus a bump to 460800 baud to reduce the wire-time bottleneck.
+
+Captured all 9 raw speed/class combinations (156 windows each) and cleaned them with a Python script that strips any row not matching exactly 192 comma-separated integers, dropping menu text, diagnostic prints, and any malformed/fused rows rather than trying to repair them.
+
+##Session 13
+Fed the 9 cleaned CSVs into NanoEdge AI Studio as a 3-class classifier (healthy/imbalance/obstruction) and ran the benchmark search across roughly 19,000 model/preprocessing combinations. Best result: an SVM model, 99% quality index, 100% balanced accuracy on the benchmark, under 2.5KB combined RAM and flash footprint. Deployed the generated library into the STM32 project.
+
+##Session 14
+Wired a new InferenceTask into the firmware to run the deployed SVM model continuously against live sensor data. Found and fixed a real bug during integration: the capture-ready semaphore was only ever being released during an active training capture session, never during normal operation, so InferenceTask had nothing to consume outside of a capture window. Fixed by having AccelTask release the semaphore on every completed window unconditionally, with capture_active now only gating whether the diagnostic print also fires, not whether data flows at all.
+
+Once live, testing revealed a real, explainable finding rather than a bug: the model classifies reliably at speed 2 and speed 3, but not at speed 1, weaker vibration amplitude at low RPM puts the fault classes too close together in feature space for the SVM's learned boundary. Flagged as a genuine modeling limitation to address via a healthy-class-focused recapture, not a pipeline defect.
+
+Cleaned up repo organization around the NanoEdge integration: separated the real, integrated library (Middleware/NanoEdgeAI, committed) from the raw Studio download artifact and host-side emulator tooling (Middlewares/NanoEdgeAI, gitignored), after confirming via arm-none-eabi-nm that the compiled libneai.a has no malloc dependency, ruling out a heap-related concern before committing.
+
+##Session 15
+Chased a printf/menu corruption bug back to its actual source: _write() started the UART DMA transfer via HAL_UART_Transmit_DMA() but returned immediately, without waiting for HAL_UART_TxCpltCallback to confirm the hardware had actually finished. Since printf's internal formatting buffer is shared across every call site, a second task could start formatting into that same buffer while the DMA hardware was still physically reading bytes out of it for the previous call, producing fused, garbled menu text. Fixed by making _write() block on uartTxSemaphoreHandle a second time after starting the transfer, so it doesn't return until TxCpltCallback genuinely confirms completion.
+
+That fix exposed a second, unrelated problem: fixing _write() meant every printf() call now held its calling task's stack frame open for the real wire transfer time (~13ms at 115200 baud) instead of returning almost instantly. Several tasks were already running stack sizes tight enough that this pushed them into genuine, silent stack overflows, caught one at a time across a long debugging session that also chased and disproved several other theories (FPU context-switch corruption, EXTI0/DRDY noise, a missing SysTick handler, a stuck DMA completion callback) before finally using the onboard ST-LINK debugger to pause the CPU mid-freeze and read the FreeRTOS call stack directly. Every freeze traced back to vApplicationStackOverflowHook, in three different tasks in turn as each prior one got fixed: WatchdogTask (128->512 words), AccelTask (128->256), DHT11Task (128->256). Also enabled configENABLE_FPU, which had been left disabled in the FreeRTOS config despite InferenceTask doing real floating-point SVM work, a genuine correctness risk even though it wasn't the actual cause of this particular freeze.
+
+Key lesson: vApplicationStackOverflowHook fired once early in this session and was treated as a one-off, already-patched instance rather than an active, ongoing risk. Every task that overflowed afterward looked like a new, unrelated mystery instead of the same class of bug recurring in a different task. Next time a system hangs completely with no crash and no fault, check the stack overflow hook and the debugger's live call stack before spending time on other theories.
+
+Bumped CAPTURE_WINDOW_COUNT from 156 to 350 windows per file for richer per-class training data, then recaptured all 9 speed/class combinations clean, once the fixes above made an uninterrupted 350-window capture actually possible. Verified every _clean.csv lands at exactly 350 rows with 192 fields each, zero dropped rows, before committing.
