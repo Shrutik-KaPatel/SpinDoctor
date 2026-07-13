@@ -1,0 +1,124 @@
+{
+    "accelerators": [],
+    "algorithm_type": "classifier",
+    "class_names": [
+        "obstruction",
+        "imbalance",
+        "healthy"
+    ],
+    "commit": "HEAD",
+    "compilation_date": "2026-07-07T17:19:01.161806",
+    "compilation_flags": {
+        "float_abi": "hard",
+        "fshort_enums": true,
+        "short_wchar": false
+    },
+    "compilation_str": "{'compilation_dict':{'request_type':'library','api':{'env':'PROD','version':'v3'},'version':{'web_api':{'env':'PROD','version':'v3'},'local_api':{'version':'2026.03.05.0','platform':'unix'},'studio':'5.1.1'},'compilation_flags':{'float_abi':'hard','short_wchar':false,'fshort_enums':true,'use_knowledge':false},'mcu':'cortex-m4_st_stm32f4_stm32f407g-disc1','sensor':'','accelerators':[],'request_origin':'manual','algorithm_type':'classifier','lib_version':'v3_3938dd5','info':{'progression':{'evals_done':20000,'optimization_progress':1.0,'elapsed_time':7124,'cpu_info':{'cpu_nb_cores':12,'cpu_nb_cores_for_optimization':8},'state':'finished'},'max_ram':192000,'max_flash':1024000,'optimization_global_id':'bddca012bb87251fdd6463c15501171d','version':{'local_api':'2026.03.05.0','studio':'5.1.1'},'creation_date':'2026-07-07T13:14:50+00:00'},'class_names':'obstruction,imbalance,healthy','results':[{'result_id':87,'combination':{'type':'classification','name':'SVM','params':{'c':0.03515250077630542,'beta':5.0,'tmp_dir_path':null},'preprocessing_chain':[{'stft':{'windows':1,'window_type':'hamming'}},{'normalize':{'method':'robust','q_low':0.46,'q_high':0.58}}]},'model':null,'performance':{'performance':{'score':0.99,'main_kpi':1.0},'memory_usage':{'estimated_ram':1816,'estimated_flash':2216,'estimated_flash_knowledge':null}},'learning_min_lines':null,'knowledge':'eNq1V1nPq0iS_Sut-zwusWNamgdWsxlIVuNSCWH2fQdD6f734fOt6uluVatrRjNvmccZ4ciIQ5zIX7_1Y9KPXZRMU9Fm3_76l59__TbN6Xyufv1WtP0yB3HRJO1UdO0Ha4MpbPo6mc4dDMPof_zlhNIknJfxgxHYB4nysG2T-gtBv59It8z_c18o8oe-oq6dk_ePEL9iDYo2LqKPxc_QL-eB7QS6LZiKI_k9ot-gqEvStIiKpJ2nj30czuG5-CZik0TfIsn2Oja46Pg6Z4jc3IQxOsTx5aPQFPjeal3m8jFgo01i4dwJqBi_C3J0XnasDA6xXCdVpgZKEeph3t29piC9ATPS5qhBMqYVUJ2LtOqTwa9gjqm2b8q0HbTyuAjtq6eCTRMvMNSvCTYbUuon9ktEDIXoqaId9PSZ89UD0fqjpqYgded2RWFtTHdkRXuC6YBwJzdjbzdRGH1xl0QnoyyGelUcJYnahb6jKo2PKlNaAeeVRjowVOYwJEifKk2hOdPahjywpJaJMYOqbRIypLtxcQtkKN1KIO5ccKM56glUCH17mbF7dNBB9CWfaOuwyIamGZqm__Pbmet43vuvxH9L6y6cUeQLm_Lwg_1MYL98SticxJumJA7apen3IBzHcD9_n8cl-f79bwX7MOO_y_e74zxsmi-6fp08adSNTVj_KPb_jrT_gmj_f6QNf6PfeYtgDetz3S51fR5rwvc_AUn4T0emOf5HYAjqMzc_oH_B6O1G04_gcsw0alb6ZlfeeMkZbhxxCuzUteS1iSthbkZxxWQUWKvMXvVMXmEl1pT5Yax0g4x6TsWuEqj38QGp4mOP2XAFD7D2_sorSCW7LFKCA4xtwzl3KsIptiz6Ckxkajl3LlNy1l7XC2jcha_M9U7OnLZtKdhZXoTsCGJqnmK1HTS3Rwpp1cbmXC1BKSi9fq9UCBpndhfwO8hnwEJ6fIgyax5FAYq4UyE90dA3azTtAEqXevC6nag4i-wFBbpVF_j7TR0Y1omBCbZM43kjmcWei6uxBAEyvSsjpWSZj-DkAtBUanmdB83MI0U4gvXpWLyiIeSTfd9VGaxAB7zyVPzzvlIzgn4COi_famlm9YUYwYz5LqS4OuayBEHTgCKcGpLGa5-ztFDmYOWs2FGW9YwXe11VAOm3zFFZFe5Za-89QEjaXknjfMzsVvIlIHB2cNT36MDs1BMwmK2b5qh-bmrsQ2ZDUG8FXymuFsTMhSZiUOGzxMumn1LMA6_voJIHpBIQan4yrwStSf9PfqlfREb__cf6IWBeZPmfYiCqd6g5bLnDOwppvrmBufDgcO8dr-V9HXNXjqpNwTx6yJyz25tvPcg1OST3KtvNgidnh7kPWlgZKnXmXJnNuKcIxsBmqju2qmdGzpuAHJZ0SA_nmGH7JwFAUfk5b7wyamZJOuoBQkQ2ZCmPteeurjkCAmbTykTfAsUHlT6D9Ta-eT179DVHs1gAmvBxdVQiTmb2kjYyyPibwWs293TZxjG4swKUCxl98JzZyPBVgNyGHNLerm6yPH4EYD5U3dGgTXuzbOcPABVeunN_bM8nF6QjDC50AfOGaBIav4ypCg76GCpNqzqGt13VBRUDxY4Ed3HN0q29gOzGh47kIATDWgkHQI0gz0qe75TADrSogT4tU16aIfJkKA4lALOlnZchS6VY5HK3wNugekf2LqPMdg2NA8TnJkjpcPnJVvEug4upMLyxcidD4yaPwWabGC_llJSz5M23Aco3baUmG--yAU2e_4fGNq82aG6yM_46820VCaQ0TA6zSNwUYLb9Oy_pq8mw-LLSdfd_y8CPXjTJnHfxl6exey3T_O33xnhC0E8Y8Teafvb49fv3L8dNFyc_SDsVWRvWQZ20v48Mf9_2v7r8D2H5baigvhyesQRRHZ5xTb-deSUf6uM_QZ-o_8ywsT0Yzrbc-J3RV1mUjNDw-36bRUK7tali2gtJBhq16MNj8ep77FeSYnod5JZJ7cnqUtj4nRxuL8u8llvzii4HaSywf_HgrYzdFN9v4-MmxQCZUC8dg74S7RDZ4_p2fcFP-l36K1PeHHfoAnY7qmLvePFMtelxQkxMorOKRraltn-me294N26v9uXJZK_S64RwplRlx4IncgQDkux3fsJbRq7HIQ9jkTueR9pJ8Ni1dDDG-egeMRJJxHZcekN4Ai1ugr2sgnSTfZyW71FzCeSu1ohyW3NX87agCO8RlijNOgV9eYTHsMqqhRAkaAZpnZQYpRccWnoxB5bYDPxB8xFZtrc-aIVsyrC2R619WJ-GfMGEqzqO5vh-MlgTITBmiWUA-9asbz43DM8B7T2qmLKikzSy4aFHV3Jd8ALU4HBPRI0YJoYqcj_1jrhI_Pt5-IHtoEvwqv1Yf4-tKraKP8VKI5GdXNVeQZYzXCOR2Rj9zJFQ0E6hQWsGI5u2eXsJw63P302AvFidQ-WVdh7vO5sR4r0qHp0vLtBVlbwguvB1a-Ak-X4u1to3_MB3pCZGsJ_EVQgX8_r2EjZ9ZY8xqxxJ1ZJ3cfiFCN1kVELJ2NxvEbklA8LGI_kUhTK4UVGP38t3Q8a7IZAPVFYOYmXbl97c1Q1mcK2MIREnsjC6lJMdoZAtqeaDTmuNS5nhicEbZDCWp5pcOVc52maD36egTSpNfiXsIkEUEanQhqoMMlZs67qG5_SpcFmSeitN2sKtJOWP4E46paGuKWC0yh62MlxoYV7Hihsf9M0X2okRj8ZM9m3IwfAyH5xm5O-lJlNm6ba7kC44HTs6qltCwJgxboL6nV-Vt2lICgdV7JLAj0c25c0VBYM8Vsf5SojePtI3b6vJ5kf80LP0fhfce6ALU1qq2OKPirWTF0gYL7E4A2_ddlF8WY27b49rokt8esu23Cv6W38c9HKDzAlz11Bn8pgipuLquu64jOBCDCy0-WL1XPQzw09CcAedkDb_JSeEE7ZxpJTOlE0vxWjIKe2enhZ29tnAH90UbzKGdUlngQquJ5yulGOL16lKUZLksjm37xNaMHpXxQHuiUI3phqS7hEU07X9Fo3bQWYSpsmqEAT0-66hlkpcLpTJXSvvdc9HxaYS3ABjzL-yHVJ2p7Gy4XF2FibQ8P4qXN-lh2KKIIRrKmWxDRFbQvpLw7C1Sayh0O0MQRU1ulvNrMENfYXwreIK6Rw5FEuTD_Q-ELclTxM55XX20sbepY7Eq846y9XmH3C9LP0MUGbP3sTGVNcw2YDnOP2cetArmEWsgouqQGLNzRtuzd7olNw60xsRUjl96XFb1aGoD8UDM5b7iLd2nTxh6FnCcF8QTa9nx_VZWtvtlMv5lO7kNLC1omnvXjtSAVta3ToNhyV4qpfx1tWTBe11fSHF68EIcJGY3cVbo6XX7VsCJ9soXWPe2oZ4Zu4PUut6O6-eg_0aJnV0ChK6bqaAQnJXsHOo7Iffvfkxll8y1xbMweiL5qy9DTlPdI0CNsA8f4D2j-r9W9FDrtc_NXR9hKdIi2Scfjzbv-Qm6NJ0Sr5eGdBHseZkjJL-s_8JgiAMJWGUQCkIwQgMh6jP8-kf7T7C9veGly9LHIagK3nFEBiBSQRC_8AQppA_sESIK4VBxBXFcAwhcRj9yO4n9qANmx-P9m_dazqvFc1fYvvlpHmFddhGydcmT8J6zvdvv3z__l-KYYTM','knowledge_dat':null,'commit_tag_used':'v3_3938dd5'}],'data':{'nb_cols':192,'nb_lines':[[{'file_type':'class','nb_lines':131},{'file_type':'class','nb_lines':154},{'file_type':'class','nb_lines':105},{'file_type':'class','nb_lines':140},{'file_type':'class','nb_lines':126},{'file_type':'class','nb_lines':142},{'file_type':'class','nb_lines':51},{'file_type':'class','nb_lines':141},{'file_type':'class','nb_lines':123}]]},'toolchain_type':'gcc','only_emulators':false},'sign':201663,'license_key':'***'}",
+    "compile_emulators": true,
+    "compile_library": true,
+    "data": {
+        "nb_cols": 192,
+        "nb_lines": [
+            [
+                {
+                    "file_type": "class",
+                    "nb_lines": 131
+                },
+                {
+                    "file_type": "class",
+                    "nb_lines": 154
+                },
+                {
+                    "file_type": "class",
+                    "nb_lines": 105
+                },
+                {
+                    "file_type": "class",
+                    "nb_lines": 140
+                },
+                {
+                    "file_type": "class",
+                    "nb_lines": 126
+                },
+                {
+                    "file_type": "class",
+                    "nb_lines": 142
+                },
+                {
+                    "file_type": "class",
+                    "nb_lines": 51
+                },
+                {
+                    "file_type": "class",
+                    "nb_lines": 141
+                },
+                {
+                    "file_type": "class",
+                    "nb_lines": 123
+                }
+            ]
+        ]
+    },
+    "learning_min_lines": null,
+    "lib_limited": false,
+    "library_id": "6a4d3505c30502d041d59dcd",
+    "library_md5sum": "79cc55cabf08b98d2c3178763f531bae",
+    "mcu": "cortex-m4_st_stm32f4_stm32f407g-disc1",
+    "mcu_cpn": "STM32F407G-DISC1",
+    "mcu_display_name": "STM32F407G-DISC1 - STMicroelectronics",
+    "mcu_family": "STM32F4 Series",
+    "mcu_group": "demo",
+    "mcu_type": "cortex-m4",
+    "mcu_vendor": "STMicroelectronics",
+    "optimization_info": {
+        "creation_date": "2026-07-07T13:14:50+00:00",
+        "max_flash": 1024000,
+        "max_ram": 192000,
+        "optimization_global_id": "bddca012bb87251fdd6463c15501171d",
+        "progression": {
+            "cpu_info": {
+                "cpu_nb_cores": 12,
+                "cpu_nb_cores_for_optimization": 8
+            },
+            "elapsed_time": 7124,
+            "evals_done": 20000,
+            "optimization_progress": 1.0,
+            "state": "finished"
+        },
+        "version": {
+            "local_api": "2026.03.05.0",
+            "studio": "5.1.1"
+        }
+    },
+    "performance": {
+        "memory_usage": {
+            "estimated_flash": 2216,
+            "estimated_flash_knowledge": null,
+            "estimated_ram": 1816
+        },
+        "performance": {
+            "main_kpi": 1.0,
+            "score": 0.99
+        }
+    },
+    "request_type": "library",
+    "sensor": "",
+    "studio_info": {
+        "local_api": {
+            "platform": "unix",
+            "version": "2026.03.05.0"
+        },
+        "studio": "5.1.1",
+        "web_api": {
+            "env": "PROD",
+            "version": "v3"
+        }
+    },
+    "toolchain_version": "arm-none-eabi-gcc (Arm GNU Toolchain 13.2.rel1 (Build arm-13.7)) 13.2.1 20231009",
+    "user_info": {
+        "company": "Shrutik",
+        "email": "ka.patelshrutik37@gmail.com",
+        "first_name": "Shrutik",
+        "last_name": "Ka Patel"
+    }
+}
