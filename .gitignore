@@ -40,3 +40,4 @@ firmware/stm32/SpinDoctor_STM32/Middlewares/
 
 # NanoEdge host-side emulator tooling (not used by STM32 target build)
 firmware/stm32/SpinDoctor_STM32/Middleware/NanoEdgeAI/emulators/
+firmware/stm32/SpinDoctor_STM32/Middleware/NanoEdgeAI_svm_backup/
