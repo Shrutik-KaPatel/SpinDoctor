@@ -219,6 +219,16 @@ void app_main(void)
         nvs_close(handle);
         return;
     }
+    
+    char gemini_key[80] = {0};
+    size_t gemini_key_len = sizeof(gemini_key);
+    err = nvs_get_str(handle, "gemini_api_key", gemini_key, &gemini_key_len);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to read gemini_api_key: %s", esp_err_to_name(err));
+        nvs_close(handle);
+        return;
+    }
+    ESP_LOGI(TAG, "Gemini key length: %d chars", (int)strlen(gemini_key));
 
     nvs_close(handle);
 
