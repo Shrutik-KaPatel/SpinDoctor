@@ -55,6 +55,7 @@ DMA_HandleTypeDef hdma_spi1_rx;
 DMA_HandleTypeDef hdma_spi1_tx;
 
 UART_HandleTypeDef huart2;
+UART_HandleTypeDef huart3;
 DMA_HandleTypeDef hdma_usart2_tx;
 
 osThreadId AccelTaskHandle;
@@ -119,6 +120,7 @@ static void MX_SPI1_Init(void);
 static void MX_USART2_UART_Init(void);
 static void MX_ADC1_Init(void);
 static void MX_IWDG_Init(void);
+static void MX_USART3_UART_Init(void);
 void StartAccelTask(void const * argument);
 void StartDHT11Task(void const * argument);
 void StartWatchdogTask(void const * argument);
@@ -168,6 +170,7 @@ int main(void)
   MX_USART2_UART_Init();
   MX_ADC1_Init();
   MX_IWDG_Init();
+  MX_USART3_UART_Init();
   /* USER CODE BEGIN 2 */
   hlis.hspi    = &hspi1;
     hlis.cs_port = GPIOE;
@@ -498,6 +501,39 @@ static void MX_USART2_UART_Init(void)
   /* USER CODE BEGIN USART2_Init 2 */
 
   /* USER CODE END USART2_Init 2 */
+
+}
+
+/**
+  * @brief USART3 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART3_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART3_Init 0 */
+
+  /* USER CODE END USART3_Init 0 */
+
+  /* USER CODE BEGIN USART3_Init 1 */
+
+  /* USER CODE END USART3_Init 1 */
+  huart3.Instance = USART3;
+  huart3.Init.BaudRate = 115200;
+  huart3.Init.WordLength = UART_WORDLENGTH_8B;
+  huart3.Init.StopBits = UART_STOPBITS_1;
+  huart3.Init.Parity = UART_PARITY_NONE;
+  huart3.Init.Mode = UART_MODE_TX_RX;
+  huart3.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart3.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART3_Init 2 */
+
+  /* USER CODE END USART3_Init 2 */
 
 }
 
@@ -994,46 +1030,66 @@ void StartInferenceTask(void const * argument)
 {
   /* USER CODE BEGIN StartInferenceTask */
 	float input_signal[NEAI_INPUT_SIGNAL_LENGTH * NEAI_INPUT_AXIS_NUMBER];
-	  float probabilities[NEAI_NUMBER_OF_CLASSES];
-	  int id_class;
-	  enum neai_state state;
+		  float probabilities[NEAI_NUMBER_OF_CLASSES];
+		  int id_class;
+		  enum neai_state state;
 
-	  for(;;)
-	  {
-	      osSemaphoreWait(captureDataReadyHandle, osWaitForever);
+		  for(;;)
+		  {
+		      osSemaphoreWait(captureDataReadyHandle, osWaitForever);
 
-	      /* Only run inference when NOT in an active training capture
-	       * session. CaptureTask and InferenceTask share the same
-	       * capture-buffer/semaphore pair; during a capture, CaptureTask
-	       * owns that data exclusively (streaming it for NanoEdge Studio
-	       * training), so InferenceTask must skip processing to avoid
-	       * silently splitting windows between the two consumers. */
-	      if (capture_active)
-	      {
-	          continue;
-	      }
+		      /* Only run inference when NOT in an active training capture
+		       * session. CaptureTask and InferenceTask share the same
+		       * capture-buffer/semaphore pair; during a capture, CaptureTask
+		       * owns that data exclusively (streaming it for NanoEdge Studio
+		       * training), so InferenceTask must skip processing to avoid
+		       * silently splitting windows between the two consumers. */
+		      if (capture_active)
+		      {
+		          continue;
+		      }
 
-	      uint8_t idx = capture_ready_idx;
+		      uint8_t idx = capture_ready_idx;
 
-	      for (int i = 0; i < CAPTURE_BUF_SIZE; i++)
-	      {
-	          input_signal[i * 3 + 0] = (float)capture_buf_x[idx][i];
-	          input_signal[i * 3 + 1] = (float)capture_buf_y[idx][i];
-	          input_signal[i * 3 + 2] = (float)capture_buf_z[idx][i];
-	      }
+		      for (int i = 0; i < CAPTURE_BUF_SIZE; i++)
+		      {
+		          input_signal[i * 3 + 0] = (float)capture_buf_x[idx][i];
+		          input_signal[i * 3 + 1] = (float)capture_buf_y[idx][i];
+		          input_signal[i * 3 + 2] = (float)capture_buf_z[idx][i];
+		      }
 
-	      state = neai_classification(input_signal, probabilities, &id_class);
+		      state = neai_classification(input_signal, probabilities, &id_class);
 
-	      if (state == NEAI_OK)
-	      {
-	          osMutexWait(printfMutexHandle, osWaitForever);
-	          const char* class_names[] = {"obstruction", "imbalance", "healthy"};
-	          printf("Fault class: %s (%.1f%%)\r\n",
-	                 class_names[id_class],
-	                 probabilities[id_class] * 100.0f);
-	          osMutexRelease(printfMutexHandle);
-	      }
-	  }
+		      if (state == NEAI_OK)
+		      {
+		          const char* class_names[] = {"obstruction", "imbalance", "healthy"};
+
+		          osMutexWait(printfMutexHandle, osWaitForever);
+		          printf("Fault class: %s (%.1f%%)\r\n",
+		                 class_names[id_class],
+		                 probabilities[id_class] * 100.0f);
+		          osMutexRelease(printfMutexHandle);
+
+		          /* Grab the latest DHT11 temperature reading under its mutex,
+		           * combine integer/decimal parts into a single float. */
+		          osMutexWait(diagnosticsMutexHandle, osWaitForever);
+		          float temp_c = diagnostics.temp_int + (diagnostics.temp_dec / 10.0f);
+		          osMutexRelease(diagnosticsMutexHandle);
+
+		          /* Build the JSON line for the ESP32 gateway and send over
+		           * USART3. Class index mapping matches class_names[] above:
+		           * 0=obstruction, 1=imbalance, 2=healthy. */
+		          char uart3_msg[160];
+		          int len = sprintf(uart3_msg,
+		              "{\"fault_class\":\"%s\",\"confidence\":%.2f,"
+		              "\"healthy\":%.2f,\"imbalance\":%.2f,\"obstruction\":%.2f,"
+		              "\"temp_c\":%.1f}\n",
+		              class_names[id_class], probabilities[id_class],
+		              probabilities[2], probabilities[1], probabilities[0],
+		              temp_c);
+		          HAL_UART_Transmit(&huart3, (uint8_t*)uart3_msg, len, HAL_MAX_DELAY);
+		      }
+		  }
   /* USER CODE END StartInferenceTask */
 }
 

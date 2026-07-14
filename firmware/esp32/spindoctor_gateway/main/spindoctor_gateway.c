@@ -6,7 +6,9 @@
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_netif.h"
+#include "driver/uart.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "freertos/event_groups.h"
 
 static const char *TAG = "spindoctor_gateway";
@@ -14,6 +16,11 @@ static const char *TAG = "spindoctor_gateway";
 #define MAX_RETRY 5
 #define WIFI_CONNECTED_BIT BIT0
 #define WIFI_FAIL_BIT       BIT1
+
+#define STM32_UART_PORT UART_NUM_2
+#define STM32_UART_RX_PIN 16
+#define STM32_UART_TX_PIN 17
+#define STM32_UART_BUF_SIZE 256
 
 static EventGroupHandle_t s_wifi_event_group;
 static int s_retry_count = 0;
@@ -76,11 +83,50 @@ static void wifi_init_sta(const char *ssid, const char *pass)
     }
 }
 
+static void stm32_uart_init(void)
+{
+    uart_config_t uart_config = {
+        .baud_rate = 115200,
+        .data_bits = UART_DATA_8_BITS,
+        .parity    = UART_PARITY_DISABLE,
+        .stop_bits = UART_STOP_BITS_1,
+        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+    };
+    ESP_ERROR_CHECK(uart_param_config(STM32_UART_PORT, &uart_config));
+    ESP_ERROR_CHECK(uart_set_pin(STM32_UART_PORT, STM32_UART_TX_PIN, STM32_UART_RX_PIN,
+                                  UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
+    ESP_ERROR_CHECK(uart_driver_install(STM32_UART_PORT, STM32_UART_BUF_SIZE * 2, 0, 0, NULL, 0));
+}
+
+static void stm32_uart_task(void *arg)
+{
+    static char line_buf[STM32_UART_BUF_SIZE];
+    static int line_pos = 0;
+    uint8_t byte;
+
+    while (1) {
+        int len = uart_read_bytes(STM32_UART_PORT, &byte, 1, pdMS_TO_TICKS(1000));
+        if (len > 0) {
+            if (byte == '\n') {
+                line_buf[line_pos] = '\0';
+                ESP_LOGI("STM32_LINK", "Received: %s", line_buf);
+                line_pos = 0;
+            } else if (line_pos < STM32_UART_BUF_SIZE - 1) {
+                line_buf[line_pos++] = byte;
+            } else {
+                /* Line too long, something's wrong upstream; reset to
+                 * avoid overflowing the buffer silently. */
+                ESP_LOGW("STM32_LINK", "Line overflow, discarding");
+                line_pos = 0;
+            }
+        }
+    }
+}
+
 void app_main(void)
 {
     esp_err_t err;
 
-    // Init the CREDS partition specifically (not the default NVS partition)
     err = nvs_flash_init_partition("creds");
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase_partition("creds"));
@@ -88,7 +134,6 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(err);
 
-    // Also init the default NVS partition, since the WiFi driver needs it internally
     err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
@@ -96,7 +141,6 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(err);
 
-    // Open a handle scoped to the "wifi_creds" namespace inside the "creds" partition
     nvs_handle_t handle;
     err = nvs_open_from_partition("creds", "wifi_creds", NVS_READONLY, &handle);
     if (err != ESP_OK) {
@@ -128,4 +172,7 @@ void app_main(void)
     ESP_LOGI(TAG, "Password length: %d chars", (int)strlen(pass));
 
     wifi_init_sta(ssid, pass);
+
+    stm32_uart_init();
+    xTaskCreate(stm32_uart_task, "stm32_uart_task", 4096, NULL, 5, NULL);
 }
