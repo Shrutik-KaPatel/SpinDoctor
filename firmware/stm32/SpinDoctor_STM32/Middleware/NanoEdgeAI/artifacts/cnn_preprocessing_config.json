@@ -1,0 +1,25 @@
+[
+  {
+    "stft": {
+      "windows": 1,
+      "window_type": "rectangular"
+    }
+  },
+  {
+    "pooling": {
+      "strategy": "mean",
+      "output_percentage": 17,
+      "n_windows": 1
+    }
+  },
+  {
+    "normalize": {
+      "method": "robust",
+      "q_low": 0.68,
+      "q_high": 0.7799999999999999
+    }
+  },
+  {
+    "interleaved": {}
+  }
+]

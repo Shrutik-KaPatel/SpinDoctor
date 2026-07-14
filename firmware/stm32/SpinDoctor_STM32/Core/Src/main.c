@@ -1027,8 +1027,9 @@ void StartInferenceTask(void const * argument)
 	      if (state == NEAI_OK)
 	      {
 	          osMutexWait(printfMutexHandle, osWaitForever);
+	          const char* class_names[] = {"obstruction", "imbalance", "healthy"};
 	          printf("Fault class: %s (%.1f%%)\r\n",
-	                 neai_get_class_name(id_class),
+	                 class_names[id_class],
 	                 probabilities[id_class] * 100.0f);
 	          osMutexRelease(printfMutexHandle);
 	      }
