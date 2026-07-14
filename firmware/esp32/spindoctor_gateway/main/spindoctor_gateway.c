@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <string.h>
+#include <stdbool.h>
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "esp_log.h"
@@ -7,6 +8,7 @@
 #include "esp_event.h"
 #include "esp_netif.h"
 #include "driver/uart.h"
+#include "cJSON.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
@@ -24,6 +26,16 @@ static const char *TAG = "spindoctor_gateway";
 
 static EventGroupHandle_t s_wifi_event_group;
 static int s_retry_count = 0;
+
+typedef struct {
+    char fault_class[16];
+    float confidence;
+    float healthy;
+    float imbalance;
+    float obstruction;
+    float temp_c;
+    bool valid;
+} spindoctor_reading_t;
 
 static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                                 int32_t event_id, void *event_data)
@@ -98,6 +110,43 @@ static void stm32_uart_init(void)
     ESP_ERROR_CHECK(uart_driver_install(STM32_UART_PORT, STM32_UART_BUF_SIZE * 2, 0, 0, NULL, 0));
 }
 
+static spindoctor_reading_t parse_stm32_line(const char *line)
+{
+    spindoctor_reading_t reading = { .valid = false };
+
+    cJSON *root = cJSON_Parse(line);
+    if (root == NULL) {
+        ESP_LOGW("PARSE", "JSON parse failed for line: %s", line);
+        return reading;
+    }
+
+    cJSON *fault_class = cJSON_GetObjectItem(root, "fault_class");
+    cJSON *confidence  = cJSON_GetObjectItem(root, "confidence");
+    cJSON *healthy     = cJSON_GetObjectItem(root, "healthy");
+    cJSON *imbalance   = cJSON_GetObjectItem(root, "imbalance");
+    cJSON *obstruction = cJSON_GetObjectItem(root, "obstruction");
+    cJSON *temp_c      = cJSON_GetObjectItem(root, "temp_c");
+
+    if (!cJSON_IsString(fault_class) || !cJSON_IsNumber(confidence) ||
+        !cJSON_IsNumber(healthy) || !cJSON_IsNumber(imbalance) ||
+        !cJSON_IsNumber(obstruction) || !cJSON_IsNumber(temp_c)) {
+        ESP_LOGW("PARSE", "Missing or malformed field in line: %s", line);
+        cJSON_Delete(root);
+        return reading;
+    }
+
+    strncpy(reading.fault_class, fault_class->valuestring, sizeof(reading.fault_class) - 1);
+    reading.confidence  = (float)confidence->valuedouble;
+    reading.healthy     = (float)healthy->valuedouble;
+    reading.imbalance   = (float)imbalance->valuedouble;
+    reading.obstruction = (float)obstruction->valuedouble;
+    reading.temp_c      = (float)temp_c->valuedouble;
+    reading.valid       = true;
+
+    cJSON_Delete(root);
+    return reading;
+}
+
 static void stm32_uart_task(void *arg)
 {
     static char line_buf[STM32_UART_BUF_SIZE];
@@ -109,13 +158,18 @@ static void stm32_uart_task(void *arg)
         if (len > 0) {
             if (byte == '\n') {
                 line_buf[line_pos] = '\0';
-                ESP_LOGI("STM32_LINK", "Received: %s", line_buf);
                 line_pos = 0;
+
+                spindoctor_reading_t reading = parse_stm32_line(line_buf);
+                if (reading.valid) {
+                    ESP_LOGI("PARSE", "fault_class=%s confidence=%.2f healthy=%.2f imbalance=%.2f obstruction=%.2f temp_c=%.1f",
+                             reading.fault_class, reading.confidence,
+                             reading.healthy, reading.imbalance,
+                             reading.obstruction, reading.temp_c);
+                }
             } else if (line_pos < STM32_UART_BUF_SIZE - 1) {
                 line_buf[line_pos++] = byte;
             } else {
-                /* Line too long, something's wrong upstream; reset to
-                 * avoid overflowing the buffer silently. */
                 ESP_LOGW("STM32_LINK", "Line overflow, discarding");
                 line_pos = 0;
             }
