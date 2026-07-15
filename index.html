@@ -221,9 +221,8 @@
     font-family: "Share Tech Mono", monospace; text-transform: uppercase;
   }
   .axis-overlay.pct-100 { top: 6px; left: 8px; }
-  .axis-overlay.pct-0 { bottom: 22px; left: 8px; }
-  .axis-overlay.t-old { bottom: 6px; left: 8px; }
-  .axis-overlay.t-now { bottom: 6px; right: 8px; }
+  .axis-overlay.pct-0 { top: 20px; left: 8px; }
+  .axis-overlay.t-now { bottom: 6px; left: 8px; }
   .axis-overlay.orbit-hint { top: 6px; right: 8px; }
 
   .chart-legend {
@@ -478,13 +477,12 @@
   </div>
 
   <div class="panel center boot d3">
-    <h2>Fault Composition &mdash; Last 100 Readings</h2>
+    <h2>System Pulse Ring &mdash; Last 100 Readings</h2>
     <div class="chart-wrap">
       <div id="fault-chart-3d"></div>
-      <div class="axis-overlay pct-100">100%</div>
-      <div class="axis-overlay pct-0">0%</div>
-      <div class="axis-overlay t-old">oldest</div>
-      <div class="axis-overlay t-now">now &#9654;</div>
+      <div class="axis-overlay pct-100">tall + cyan = healthy</div>
+      <div class="axis-overlay pct-0">short + amber/red = fault</div>
+      <div class="axis-overlay t-now">&#9660; marks newest</div>
       <div class="axis-overlay orbit-hint">drag to orbit</div>
     </div>
     <div class="chart-legend">
@@ -824,13 +822,15 @@ function renderAnalytics(buffer) {
   renderStateReadout(buffer);
 }
 
-/* ---------- fault composition chart (hero) ---------- */
-let fcScene, fcCamera, fcRenderer, fcRoot, fcBars;
-let fcDragActive = false, fcDragLastX = 0, fcDragLastY = 0, fcYaw = -0.5, fcPitch = 0.28;
+/* ---------- fault composition ring (hero) ---------- */
+let fcScene, fcCamera, fcRenderer, fcRoot, fcBars, fcCore, fcCoreLight, fcNowMarker;
+let fcDragActive = false, fcDragLastX = 0, fcDragLastY = 0, fcYaw = 0.6, fcPitch = 0.55;
 
-const BAR_SPACING = 0.9;
-const BAR_SIZE = 0.62;
-const MAX_HEIGHT = 3.2;
+const RING_RADIUS = 4.2;
+const MAX_BAR_H = 2.4;
+const CAM_DIST = 10.5;
+
+const CLASS_COLORS = { healthy: 0x22d3ee, imbalance: 0xfbbf24, obstruction: 0xfb7185 };
 
 function initFaultChart3D() {
   const container = document.getElementById('fault-chart-3d');
@@ -838,23 +838,51 @@ function initFaultChart3D() {
   const height = container.clientHeight || 300;
 
   fcScene = new THREE.Scene();
-  fcCamera = new THREE.PerspectiveCamera(42, width / height, 0.1, 200);
+  fcCamera = new THREE.PerspectiveCamera(45, width / height, 0.1, 100);
 
   fcRenderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
   fcRenderer.setSize(width, height);
   container.appendChild(fcRenderer.domElement);
 
-  fcScene.add(new THREE.AmbientLight(0xffffff, 0.55));
-  const dirLight = new THREE.DirectionalLight(0xffffff, 0.7);
-  dirLight.position.set(4, 8, 6);
+  fcScene.add(new THREE.AmbientLight(0xffffff, 0.45));
+  const dirLight = new THREE.DirectionalLight(0xffffff, 0.6);
+  dirLight.position.set(5, 9, 4);
   fcScene.add(dirLight);
 
   fcRoot = new THREE.Group();
   fcScene.add(fcRoot);
 
-  const grid = new THREE.GridHelper(120, 60, 0x1c3a4d, 0x14232f);
-  grid.position.y = 0;
-  fcRoot.add(grid);
+  // base ring guides
+  const ringGuide = (radius, opacity) => new THREE.Mesh(
+    new THREE.TorusGeometry(radius, 0.012, 8, 120),
+    new THREE.MeshBasicMaterial({ color: 0x2a4d63, transparent: true, opacity })
+  );
+  const g1 = ringGuide(RING_RADIUS - 0.55, 0.5); g1.rotation.x = Math.PI / 2;
+  const g2 = ringGuide(RING_RADIUS + 0.55, 0.3); g2.rotation.x = Math.PI / 2;
+  fcRoot.add(g1, g2);
+
+  // glowing core: current state indicator, arc-reactor style
+  fcCore = new THREE.Mesh(
+    new THREE.SphereGeometry(0.55, 24, 24),
+    new THREE.MeshStandardMaterial({
+      color: 0x22d3ee, emissive: 0x22d3ee, emissiveIntensity: 0.9,
+      roughness: 0.3, metalness: 0.2
+    })
+  );
+  fcCore.position.y = 0.55;
+  fcRoot.add(fcCore);
+
+  fcCoreLight = new THREE.PointLight(0x22d3ee, 1.1, 12);
+  fcCoreLight.position.set(0, 1.2, 0);
+  fcRoot.add(fcCoreLight);
+
+  const coreHalo = new THREE.Mesh(
+    new THREE.TorusGeometry(0.85, 0.02, 8, 60),
+    new THREE.MeshBasicMaterial({ color: 0x22d3ee, transparent: true, opacity: 0.5 })
+  );
+  coreHalo.rotation.x = Math.PI / 2;
+  coreHalo.position.y = 0.55;
+  fcRoot.add(coreHalo);
 
   fcBars = new THREE.Group();
   fcRoot.add(fcBars);
@@ -866,7 +894,7 @@ function initFaultChart3D() {
     if (!fcDragActive) return;
     fcYaw += (e.clientX - fcDragLastX) * 0.006;
     fcPitch += (e.clientY - fcDragLastY) * 0.004;
-    fcPitch = Math.max(0.05, Math.min(1.1, fcPitch));
+    fcPitch = Math.max(0.15, Math.min(1.35, fcPitch));
     fcDragLastX = e.clientX; fcDragLastY = e.clientY;
   });
   window.addEventListener('pointerup', () => { fcDragActive = false; });
@@ -887,94 +915,78 @@ function renderFaultChart(buffer) {
 
   while (fcBars.children.length) {
     const m = fcBars.children.pop();
-    m.geometry.dispose();
-    m.material.dispose();
+    if (m.geometry) m.geometry.dispose();
+    if (m.material) m.material.dispose();
   }
 
   const n = buffer.length;
   if (n === 0) return;
 
-  const zLen = (n - 1) * BAR_SPACING;
+  // Newest reading sits at angle 0 (front of the ring); history wraps
+  // counter-clockwise behind it. With fewer than 100 readings the arc
+  // just isn't full yet, which honestly shows "still filling up".
+  const slots = Math.max(n, 100);
+  const angleStep = (Math.PI * 2) / slots;
 
   buffer.forEach((r, i) => {
-    const z = -i * BAR_SPACING; // oldest far away, newest closest to camera
-    const isNow = i === n - 1;
-    const segments = [
-      { frac: r.healthy, color: 0x22d3ee },
-      { frac: r.imbalance, color: 0xfbbf24 },
-      { frac: r.obstruction, color: 0xfb7185 }
-    ];
-    let yBase = 0;
-    segments.forEach(seg => {
-      const segH = Math.max(0.002, seg.frac * MAX_HEIGHT);
-      const geo = new THREE.BoxGeometry(BAR_SIZE, segH, BAR_SIZE);
-      const mat = new THREE.MeshStandardMaterial({
-        color: seg.color,
-        emissive: seg.color,
-        emissiveIntensity: isNow ? 0.55 : 0.18,
-        transparent: true,
-        opacity: isNow ? 0.95 : 0.72,
-        roughness: 0.5,
-        metalness: 0.1
-      });
-      const mesh = new THREE.Mesh(geo, mat);
-      mesh.position.set(0, yBase + segH / 2, z);
-      fcBars.add(mesh);
-      yBase += segH;
-    });
+    const age = n - 1 - i;          // 0 = newest
+    const angle = -age * angleStep; // newest at front, older wrapping back
+    const isNow = age === 0;
 
-    if (isNow) {
-      const outline = new THREE.LineSegments(
-        new THREE.EdgesGeometry(new THREE.BoxGeometry(BAR_SIZE * 1.15, MAX_HEIGHT, BAR_SIZE * 1.15)),
-        new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.5 })
-      );
-      outline.position.set(0, MAX_HEIGHT / 2, z);
-      fcBars.add(outline);
-    }
+    const cls = faultClass(r.cls);
+    const color = CLASS_COLORS[cls] || 0x8899aa;
+    // Height = healthy probability: full ring height means healthy,
+    // dips mean the model sees trouble. Fault bars stay visible at a
+    // minimum stub height so a 0%-healthy reading doesn't vanish.
+    const barH = Math.max(0.12, r.healthy * MAX_BAR_H);
+
+    const geo = new THREE.BoxGeometry(0.16, barH, 0.34);
+    const mat = new THREE.MeshStandardMaterial({
+      color, emissive: color,
+      emissiveIntensity: isNow ? 0.85 : (cls === 'healthy' ? 0.25 : 0.5),
+      transparent: true,
+      opacity: isNow ? 1.0 : 0.8,
+      roughness: 0.45, metalness: 0.1
+    });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.position.set(Math.sin(angle) * RING_RADIUS, barH / 2, Math.cos(angle) * RING_RADIUS);
+    mesh.rotation.y = angle;
+    fcBars.add(mesh);
   });
 
-  // Frame the whole row: look roughly at its midpoint, offset back and up.
-  const midZ = -zLen / 2;
-  fcRoot.position.set(0, 0, -midZ);
-  const dist = Math.max(6, zLen * 0.75);
-  fcCamera.position.set(
-    Math.sin(fcYaw) * dist * Math.cos(fcPitch),
-    dist * Math.sin(fcPitch) + 1.2,
-    Math.cos(fcYaw) * dist * Math.cos(fcPitch)
+  // "now" marker: a small bright pyramid floating over the newest bar
+  const latest = buffer[n - 1];
+  const marker = new THREE.Mesh(
+    new THREE.ConeGeometry(0.14, 0.3, 4),
+    new THREE.MeshBasicMaterial({ color: 0xffffff })
   );
-  fcCamera.lookAt(0, MAX_HEIGHT * 0.35, 0);
+  marker.position.set(0, MAX_BAR_H + 0.55, RING_RADIUS);
+  marker.rotation.x = Math.PI;
+  fcBars.add(marker);
+
+  // core reflects current state
+  const nowColor = CLASS_COLORS[faultClass(latest.cls)] || 0x22d3ee;
+  fcCore.material.color.setHex(nowColor);
+  fcCore.material.emissive.setHex(nowColor);
+  fcCoreLight.color.setHex(nowColor);
 }
 
 function animateFaultChart3D() {
   requestAnimationFrame(animateFaultChart3D);
   if (!fcRenderer) return;
-  if (!fcDragActive) fcYaw += 0.0012; // slow idle orbit
-  const dist = fcCamera.position.length ? Math.hypot(fcCamera.position.x, fcCamera.position.z) : 8;
-  fcCamera.position.x = Math.sin(fcYaw) * dist;
-  fcCamera.position.z = Math.cos(fcYaw) * dist;
-  fcCamera.lookAt(0, MAX_HEIGHT * 0.35, 0);
-  fcRenderer.render(fcScene, fcCamera);
-}
-
-function renderStateReadout(buffer) {
-  const el = document.getElementById('state-readout');
-  const latest = buffer[buffer.length - 1];
-  const spanMs = buffer[buffer.length - 1].ts.getTime() - buffer[0].ts.getTime();
-  const spanLabel = buffer.length < 3 ? 'gathering data' : formatDuration(spanMs) + ' span';
-
-  let trend = 'holding steady';
-  if (buffer.length >= 9) {
-    const third = Math.max(1, Math.floor(buffer.length / 3));
-    const avg = arr => arr.reduce((a, b) => a + b, 0) / arr.length;
-    const early = avg(buffer.slice(0, third).map(r => r.healthy));
-    const recent = avg(buffer.slice(-third).map(r => r.healthy));
-    const delta = recent - early;
-    if (delta > 0.05) trend = 'moving toward healthy';
-    else if (delta < -0.05) trend = 'drifting toward a fault';
+  if (!fcDragActive) fcYaw += 0.0015; // slow idle orbit
+  fcCamera.position.set(
+    Math.sin(fcYaw) * CAM_DIST * Math.cos(fcPitch),
+    CAM_DIST * Math.sin(fcPitch),
+    Math.cos(fcYaw) * CAM_DIST * Math.cos(fcPitch)
+  );
+  fcCamera.lookAt(0, 0.6, 0);
+  if (fcCore) {
+    const pulse = 0.75 + 0.25 * Math.sin(Date.now() * 0.003);
+    fcCore.material.emissiveIntensity = pulse;
+    fcCoreLight.intensity = 0.8 + 0.5 * pulse;
   }
-
-  el.textContent = `${buffer.length} readings \u00b7 ${spanLabel} \u00b7 ${trend} \u00b7 ` +
-    `now ${(latest.confidence * 100).toFixed(0)}% ${latest.cls}`;
+  fcRenderer.render(fcScene, fcCamera);
 }
 
 /* ---------- Gemini explain ---------- */
