@@ -16,6 +16,7 @@
 #include "freertos/event_groups.h"
 #include "freertos/semphr.h"
 #include "freertos/queue.h"
+#include "esp_timer.h"
 
 static const char *TAG = "spindoctor_gateway";
 
@@ -267,39 +268,79 @@ static bool call_gemini(const char *api_key, const spindoctor_reading_t *reading
     cJSON_Delete(root);
     return success;
 }
-
 /* Apps Script executes the POST side effect (writing to the sheet)
  * before issuing its redirect, so a 302 here already means success.
  * We never use the response body for log_reading/submit_explanation,
  * so we don't follow the redirect at all, avoiding an unnecessary
- * second network round-trip that could itself flake.
- *
- * Serialized behind s_apps_script_mutex: see comment at declaration. */
+ * second network round-trip that could itself flake. */
+ 
+/* Persistent client for all script.google.com calls, reused across
+ * every apps_script_post/get call instead of a fresh
+ * esp_http_client_init/cleanup pair per call. A from-scratch TCP+TLS
+ * handshake was taking 1-4+ seconds on this chip, and once
+ * live_update_task started firing every 3 seconds on top of the
+ * existing tasks, that handshake cost alone was eating most of the
+ * interval (measured: 3s target, 7-15s actual). Reused only under
+ * s_apps_script_mutex, so no separate locking is needed here. */
+static char s_apps_script_response_data[1024];
+static http_response_buf_t s_apps_script_resp = { .buffer = s_apps_script_response_data, .len = 0 };
+static esp_http_client_handle_t s_apps_script_client = NULL;
+
+static esp_http_client_handle_t get_apps_script_client(void)
+{
+    if (s_apps_script_client == NULL) {
+        esp_http_client_config_t config = {
+            .url = APPS_SCRIPT_URL,
+            .event_handler = gemini_http_event_handler,
+            .user_data = &s_apps_script_resp,
+            .crt_bundle_attach = esp_crt_bundle_attach,
+            .timeout_ms = 15000,
+            .disable_auto_redirect = true,
+        };
+        s_apps_script_client = esp_http_client_init(&config);
+        esp_http_client_set_header(s_apps_script_client, "Content-Type", "application/json");
+    }
+    return s_apps_script_client;
+}
+
+/* If the far end silently closes an idle keep-alive connection between
+ * our spaced-out calls, esp_http_client_perform fails outright rather
+ * than reconnecting on its own. Tear down so the next
+ * get_apps_script_client() call rebuilds from scratch. */
+static void reset_apps_script_client(void)
+{
+    if (s_apps_script_client != NULL) {
+        esp_http_client_cleanup(s_apps_script_client);
+        s_apps_script_client = NULL;
+    }
+}
+
 static bool apps_script_post(const char *json_body)
 {
     xSemaphoreTake(s_apps_script_mutex, portMAX_DELAY);
 
-    static char response_data[1024];
-    http_response_buf_t resp = { .buffer = response_data, .len = 0 };
-    memset(response_data, 0, sizeof(response_data));
+    esp_http_client_handle_t client = get_apps_script_client();
+    s_apps_script_resp.len = 0;
+    memset(s_apps_script_response_data, 0, sizeof(s_apps_script_response_data));
 
-    esp_http_client_config_t config = {
-        .url = APPS_SCRIPT_URL,
-        .method = HTTP_METHOD_POST,
-        .event_handler = gemini_http_event_handler,
-        .user_data = &resp,
-        .crt_bundle_attach = esp_crt_bundle_attach,
-        .timeout_ms = 15000,
-        .disable_auto_redirect = true,
-    };
-
-    esp_http_client_handle_t client = esp_http_client_init(&config);
-    esp_http_client_set_header(client, "Content-Type", "application/json");
+    esp_http_client_set_url(client, APPS_SCRIPT_URL);
+    esp_http_client_set_method(client, HTTP_METHOD_POST);
     esp_http_client_set_post_field(client, json_body, strlen(json_body));
 
     esp_err_t err = esp_http_client_perform(client);
     int status_code = esp_http_client_get_status_code(client);
-    esp_http_client_cleanup(client);
+
+    if (err != ESP_OK) {
+        reset_apps_script_client();
+        client = get_apps_script_client();
+        s_apps_script_resp.len = 0;
+        memset(s_apps_script_response_data, 0, sizeof(s_apps_script_response_data));
+        esp_http_client_set_url(client, APPS_SCRIPT_URL);
+        esp_http_client_set_method(client, HTTP_METHOD_POST);
+        esp_http_client_set_post_field(client, json_body, strlen(json_body));
+        err = esp_http_client_perform(client);
+        status_code = esp_http_client_get_status_code(client);
+    }
 
     xSemaphoreGive(s_apps_script_mutex);
 
@@ -316,36 +357,40 @@ static bool apps_script_get(const char *query_suffix, char *out_response, size_t
 {
     xSemaphoreTake(s_apps_script_mutex, portMAX_DELAY);
 
-    static char response_data[1024];
-    http_response_buf_t resp = { .buffer = response_data, .len = 0 };
-    memset(response_data, 0, sizeof(response_data));
-
     char url[512];
     snprintf(url, sizeof(url), "%s%s", APPS_SCRIPT_URL, query_suffix);
 
-    esp_http_client_config_t config = {
-        .url = url,
-        .method = HTTP_METHOD_GET,
-        .event_handler = gemini_http_event_handler,
-        .user_data = &resp,
-        .crt_bundle_attach = esp_crt_bundle_attach,
-        .timeout_ms = 15000,
-        .disable_auto_redirect = true,
-    };
+    esp_http_client_handle_t client = get_apps_script_client();
+    s_apps_script_resp.len = 0;
+    memset(s_apps_script_response_data, 0, sizeof(s_apps_script_response_data));
 
-    esp_http_client_handle_t client = esp_http_client_init(&config);
+    esp_http_client_set_url(client, url);
+    esp_http_client_set_method(client, HTTP_METHOD_GET);
+    esp_http_client_set_post_field(client, NULL, 0);
+
     esp_err_t err = esp_http_client_perform(client);
     int status_code = esp_http_client_get_status_code(client);
 
-    if (err == ESP_OK && (status_code == 302 || status_code == 303)) {
-        esp_http_client_set_redirection(client);
-        resp.len = 0;
-        memset(response_data, 0, sizeof(response_data));
+    if (err != ESP_OK) {
+        reset_apps_script_client();
+        client = get_apps_script_client();
+        s_apps_script_resp.len = 0;
+        memset(s_apps_script_response_data, 0, sizeof(s_apps_script_response_data));
+        esp_http_client_set_url(client, url);
+        esp_http_client_set_method(client, HTTP_METHOD_GET);
+        esp_http_client_set_post_field(client, NULL, 0);
         err = esp_http_client_perform(client);
         status_code = esp_http_client_get_status_code(client);
     }
 
-    esp_http_client_cleanup(client);
+    if (err == ESP_OK && (status_code == 302 || status_code == 303)) {
+        esp_http_client_set_redirection(client);
+        s_apps_script_resp.len = 0;
+        memset(s_apps_script_response_data, 0, sizeof(s_apps_script_response_data));
+        err = esp_http_client_perform(client);
+        status_code = esp_http_client_get_status_code(client);
+    }
+
     xSemaphoreGive(s_apps_script_mutex);
 
     if (err != ESP_OK || status_code != 200) {
@@ -353,7 +398,7 @@ static bool apps_script_get(const char *query_suffix, char *out_response, size_t
         return false;
     }
 
-    strncpy(out_response, response_data, out_size - 1);
+    strncpy(out_response, s_apps_script_response_data, out_size - 1);
     return true;
 }
 
@@ -375,6 +420,45 @@ static void sheets_log_task(void *arg)
                 ESP_LOGW("SHEETS", "Failed to log fault_class change: %s", req.fault_class);
             }
         }
+    }
+}
+
+#define LIVE_UPDATE_INTERVAL_MS 2500
+
+/* Periodically pushes the latest STM32 classification to the Live tab
+ * for the dashboard, independent of sheets_log_task's change-based
+ * historical logging. Runs on a fixed timer rather than on every new
+ * reading, since the dashboard only needs to feel "live" at
+ * human-perceptible speed, not at full inference rate. */
+static void live_update_task(void *arg)
+{
+    while (1) {
+        spindoctor_reading_t reading_copy;
+        xSemaphoreTake(s_reading_mutex, portMAX_DELAY);
+        reading_copy = s_latest_reading;
+        xSemaphoreGive(s_reading_mutex);
+
+        if (reading_copy.valid) {
+            char body[256];
+            snprintf(body, sizeof(body),
+                "{\"action\":\"update_live\",\"fault_class\":\"%s\",\"confidence\":%.2f,"
+                "\"healthy\":%.2f,\"imbalance\":%.2f,\"obstruction\":%.2f,\"temp_c\":%.1f}",
+                reading_copy.fault_class, reading_copy.confidence,
+                reading_copy.healthy, reading_copy.imbalance,
+                reading_copy.obstruction, reading_copy.temp_c);
+
+            int64_t start_us = esp_timer_get_time();
+            bool ok = apps_script_post(body);
+            int64_t elapsed_ms = (esp_timer_get_time() - start_us) / 1000;
+
+            if (ok) {
+                ESP_LOGI("LIVE", "Live update sent: %s (call took %lldms)", reading_copy.fault_class, elapsed_ms);
+            } else {
+                ESP_LOGW("LIVE", "Live update failed (call took %lldms)", elapsed_ms);
+            }
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(LIVE_UPDATE_INTERVAL_MS));
     }
 }
 
@@ -433,7 +517,7 @@ static void gateway_poll_task(void *arg)
 
     while (1) {
         char response[1024] = {0};
-       if (apps_script_get("?action=check_trigger", response, sizeof(response))) {
+        if (apps_script_get("?action=check_trigger", response, sizeof(response))) {
             ESP_LOGI("POLL", "check_trigger response: %s", response);
             cJSON *root = cJSON_Parse(response);
             if (root) {
@@ -534,6 +618,7 @@ void app_main(void)
     stm32_uart_init();
     xTaskCreate(stm32_uart_task, "stm32_uart_task", 4096, NULL, 5, NULL);
     xTaskCreate(sheets_log_task, "sheets_log_task", 8192, NULL, 4, NULL);
+    xTaskCreate(live_update_task, "live_update_task", 8192, NULL, 3, NULL);
 
     static char s_gemini_key[80];
     strncpy(s_gemini_key, gemini_key, sizeof(s_gemini_key) - 1);
