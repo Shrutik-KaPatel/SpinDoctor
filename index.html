@@ -822,15 +822,16 @@ function renderAnalytics(buffer) {
   renderStateReadout(buffer);
 }
 
-/* ---------- digital twin fan (hero) ---------- */
+/* ---------- digital twin: levitating turbine (hero) ---------- */
 let fcScene, fcCamera, fcRenderer, fcRoot, fcFanGroup, fcBladeGroup, fcHalo, fcGlowLight;
-let fcBladeMats = [], fcHubMat = null;
+let fcBladeMats = [], fcHubMat = null, fcBeamMat = null, fcBaseRingMat = null, fcCoreHaloMat = null;
+let fcGuardRings = [];
 let fcCurrentClass = 'healthy';
-let fcDragActive = false, fcDragLastX = 0, fcDragLastY = 0, fcYaw = 0.35, fcPitch = 0.18;
+let fcDragActive = false, fcDragLastX = 0, fcDragLastY = 0, fcYaw = 0.35, fcPitch = 0.16;
 let fcSpinAngle = 0, fcLastFrameT = 0;
 
-const HALO_RADIUS = 3.1;
-const CAM_DIST = 8.5;
+const HALO_RADIUS = 3.2;
+const CAM_DIST = 8.8;
 const CLASS_COLORS = { healthy: 0x22d3ee, imbalance: 0xfbbf24, obstruction: 0xfb7185 };
 
 function initFaultChart3D() {
@@ -845,80 +846,95 @@ function initFaultChart3D() {
   fcRenderer.setSize(width, height);
   container.appendChild(fcRenderer.domElement);
 
-  fcScene.add(new THREE.AmbientLight(0xffffff, 0.5));
-  const dirLight = new THREE.DirectionalLight(0xffffff, 0.65);
+  fcScene.add(new THREE.AmbientLight(0xffffff, 0.45));
+  const dirLight = new THREE.DirectionalLight(0xffffff, 0.55);
   dirLight.position.set(5, 8, 6);
   fcScene.add(dirLight);
 
-  fcGlowLight = new THREE.PointLight(0x22d3ee, 1.2, 14);
-  fcGlowLight.position.set(0, 1.2, 1.5);
+  fcGlowLight = new THREE.PointLight(0x22d3ee, 1.3, 16);
+  fcGlowLight.position.set(0, 0.8, 1.6);
   fcScene.add(fcGlowLight);
 
   fcRoot = new THREE.Group();
   fcScene.add(fcRoot);
 
-  /* ----- the fan itself (digital twin of the testbed) ----- */
+  const steel = (color) => new THREE.MeshStandardMaterial({
+    color, roughness: 0.4, metalness: 0.55
+  });
+
+  /* ----- levitation base: glowing repulsor pad ----- */
+  const basePad = new THREE.Mesh(new THREE.CylinderGeometry(1.25, 1.45, 0.14, 48), steel(0x16222e));
+  basePad.position.y = -2.55;
+  fcRoot.add(basePad);
+
+  fcBaseRingMat = new THREE.MeshBasicMaterial({ color: 0x22d3ee, transparent: true, opacity: 0.85 });
+  const baseRing = new THREE.Mesh(new THREE.TorusGeometry(1.05, 0.035, 10, 64), fcBaseRingMat);
+  baseRing.rotation.x = Math.PI / 2;
+  baseRing.position.y = -2.46;
+  fcRoot.add(baseRing);
+
+  // repulsor beam: translucent light column the turbine hovers on
+  fcBeamMat = new THREE.MeshBasicMaterial({ color: 0x22d3ee, transparent: true, opacity: 0.10 });
+  const beam = new THREE.Mesh(new THREE.CylinderGeometry(0.28, 0.75, 2.3, 32, 1, true), fcBeamMat);
+  beam.position.y = -1.35;
+  fcRoot.add(beam);
+
+  /* ----- the hovering turbine ----- */
   fcFanGroup = new THREE.Group();
   fcRoot.add(fcFanGroup);
 
-  const steel = (color) => new THREE.MeshStandardMaterial({
-    color, roughness: 0.55, metalness: 0.35
-  });
-
-  // base
-  const base = new THREE.Mesh(new THREE.CylinderGeometry(1.05, 1.2, 0.18, 32), steel(0x1c2a38));
-  base.position.y = -2.2;
-  fcFanGroup.add(base);
-
-  // pole
-  const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.09, 2.1, 16), steel(0x24384a));
-  pole.position.y = -1.15;
-  fcFanGroup.add(pole);
-
-  // motor hub (points toward camera, +Z)
+  // core: glowing sphere + halo ring, the heart of the machine
   fcHubMat = new THREE.MeshStandardMaterial({
-    color: 0x22d3ee, emissive: 0x22d3ee, emissiveIntensity: 0.5,
-    roughness: 0.4, metalness: 0.3
+    color: 0x22d3ee, emissive: 0x22d3ee, emissiveIntensity: 0.8,
+    roughness: 0.25, metalness: 0.3
   });
-  const motor = new THREE.Mesh(new THREE.CylinderGeometry(0.34, 0.34, 0.55, 24), steel(0x2c445a));
-  motor.rotation.x = Math.PI / 2;
-  fcFanGroup.add(motor);
-  const hubCap = new THREE.Mesh(new THREE.SphereGeometry(0.24, 20, 20), fcHubMat);
-  hubCap.position.z = 0.32;
-  fcFanGroup.add(hubCap);
+  const core = new THREE.Mesh(new THREE.SphereGeometry(0.3, 24, 24), fcHubMat);
+  fcFanGroup.add(core);
 
-  // blades: 3 tilted paddles on a spinning group
+  fcCoreHaloMat = new THREE.MeshBasicMaterial({ color: 0x22d3ee, transparent: true, opacity: 0.55 });
+  const coreHalo = new THREE.Mesh(new THREE.TorusGeometry(0.46, 0.018, 8, 48), fcCoreHaloMat);
+  fcFanGroup.add(coreHalo);
+
+  // swept curved blades, extruded from a curved 2D profile
+  const bladeShape = new THREE.Shape();
+  bladeShape.moveTo(0, 0.3);
+  bladeShape.quadraticCurveTo(0.6, 0.95, 0.3, 1.75);
+  bladeShape.quadraticCurveTo(-0.08, 1.62, -0.24, 0.95);
+  bladeShape.quadraticCurveTo(-0.14, 0.45, 0, 0.3);
+  const bladeGeo = new THREE.ExtrudeGeometry(bladeShape, { depth: 0.04, bevelEnabled: false });
+
   fcBladeGroup = new THREE.Group();
-  fcBladeGroup.position.z = 0.18;
   fcFanGroup.add(fcBladeGroup);
   fcBladeMats = [];
-  for (let b = 0; b < 3; b++) {
+  const BLADE_COUNT = 5;
+  for (let b = 0; b < BLADE_COUNT; b++) {
     const mat = new THREE.MeshStandardMaterial({
-      color: 0x22d3ee, emissive: 0x22d3ee, emissiveIntensity: 0.35,
-      transparent: true, opacity: 0.9, roughness: 0.4, metalness: 0.15,
+      color: 0x22d3ee, emissive: 0x22d3ee, emissiveIntensity: 0.4,
+      transparent: true, opacity: 0.88, roughness: 0.35, metalness: 0.2,
       side: THREE.DoubleSide
     });
     fcBladeMats.push(mat);
-    const blade = new THREE.Mesh(new THREE.BoxGeometry(0.55, 1.5, 0.045), mat);
-    blade.position.y = 0.95;                 // offset out from hub
-    blade.rotation.y = 0.42;                 // blade pitch
+    const blade = new THREE.Mesh(bladeGeo, mat);
+    blade.rotation.y = 0.5; // aerodynamic pitch
     const arm = new THREE.Group();
     arm.add(blade);
-    arm.rotation.z = (b / 3) * Math.PI * 2;  // 3 blades, 120 degrees apart
+    arm.rotation.z = (b / BLADE_COUNT) * Math.PI * 2;
     fcBladeGroup.add(arm);
   }
 
-  // guard ring around the blades
-  const guard = new THREE.Mesh(
-    new THREE.TorusGeometry(1.85, 0.035, 10, 80),
-    steel(0x2a4258)
-  );
-  guard.position.z = 0.18;
-  fcFanGroup.add(guard);
+  // dual counter-rotating guard rings, tilted like a gyroscope
+  const ringMat1 = steel(0x2e4b63);
+  const ringMat2 = steel(0x24394c);
+  const guard1 = new THREE.Mesh(new THREE.TorusGeometry(2.05, 0.045, 10, 90), ringMat1);
+  const guard2 = new THREE.Mesh(new THREE.TorusGeometry(2.25, 0.028, 10, 90), ringMat2);
+  guard1.rotation.x = 0.18;
+  guard2.rotation.x = -0.14;
+  fcFanGroup.add(guard1, guard2);
+  fcGuardRings = [guard1, guard2];
 
-  /* ----- history halo: last 100 readings around the fan ----- */
+  /* ----- history halo: last 100 readings around the turbine ----- */
   fcHalo = new THREE.Group();
-  fcHalo.position.z = -0.35; // just behind the fan plane
+  fcHalo.position.z = -0.4;
   fcRoot.add(fcHalo);
 
   /* ----- interaction ----- */
@@ -929,7 +945,7 @@ function initFaultChart3D() {
     if (!fcDragActive) return;
     fcYaw += (e.clientX - fcDragLastX) * 0.006;
     fcPitch += (e.clientY - fcDragLastY) * 0.004;
-    fcPitch = Math.max(-0.4, Math.min(1.1, fcPitch));
+    fcPitch = Math.max(-0.35, Math.min(1.1, fcPitch));
     fcDragLastX = e.clientX; fcDragLastY = e.clientY;
   });
   window.addEventListener('pointerup', () => { fcDragActive = false; });
@@ -957,15 +973,15 @@ function renderFaultChart(buffer) {
   const n = buffer.length;
   if (n === 0) return;
 
-  // Newest reading at the top of the halo; history wraps clockwise
-  // behind it. 100 fixed slots so a partially-filled buffer reads
-  // honestly as a partial ring.
+  // Newest reading at 12 o'clock; history wraps clockwise behind it.
+  // 100 fixed slots so a partially-filled buffer honestly reads as a
+  // partial ring while it's still filling up.
   const slots = Math.max(n, 100);
   const angleStep = (Math.PI * 2) / slots;
 
   buffer.forEach((r, i) => {
-    const age = n - 1 - i;                        // 0 = newest
-    const angle = Math.PI / 2 - age * angleStep;  // newest at 12 o'clock
+    const age = n - 1 - i;
+    const angle = Math.PI / 2 - age * angleStep;
     const isNow = age === 0;
     const cls = faultClass(r.cls);
     const color = CLASS_COLORS[cls] || 0x8899aa;
@@ -979,11 +995,10 @@ function renderFaultChart(buffer) {
       })
     );
     seg.position.set(Math.cos(angle) * HALO_RADIUS, Math.sin(angle) * HALO_RADIUS, 0);
-    seg.rotation.z = angle - Math.PI / 2; // stand each segment along the ring
+    seg.rotation.z = angle - Math.PI / 2;
     fcHalo.add(seg);
   });
 
-  // newest marker above 12 o'clock
   const marker = new THREE.Mesh(
     new THREE.ConeGeometry(0.12, 0.26, 4),
     new THREE.MeshBasicMaterial({ color: 0xffffff })
@@ -992,13 +1007,16 @@ function renderFaultChart(buffer) {
   marker.rotation.x = Math.PI;
   fcHalo.add(marker);
 
-  /* ----- fan state: color + motion mirror the live classification ----- */
+  /* ----- state tint: everything glowing follows the live class ----- */
   const latest = buffer[n - 1];
   fcCurrentClass = faultClass(latest.cls);
   const nowColor = CLASS_COLORS[fcCurrentClass] || 0x22d3ee;
   fcBladeMats.forEach(m => { m.color.setHex(nowColor); m.emissive.setHex(nowColor); });
   fcHubMat.color.setHex(nowColor);
   fcHubMat.emissive.setHex(nowColor);
+  fcCoreHaloMat.color.setHex(nowColor);
+  fcBeamMat.color.setHex(nowColor);
+  fcBaseRingMat.color.setHex(nowColor);
   fcGlowLight.color.setHex(nowColor);
 }
 
@@ -1014,28 +1032,36 @@ function animateFaultChart3D() {
   //  healthy     -> fast, smooth spin
   //  imbalance   -> spinning but visibly wobbling on its axis
   //  obstruction -> struggling: slow, stuttering rotation
-  let spinSpeed = 9.0;
+  let spinSpeed = 10.0;
   let wobble = 0;
   if (fcCurrentClass === 'imbalance') {
-    spinSpeed = 7.0;
-    wobble = Math.sin(t * 11) * 0.07;
+    spinSpeed = 7.5;
+    wobble = Math.sin(t * 11) * 0.08;
   } else if (fcCurrentClass === 'obstruction') {
-    spinSpeed = Math.max(0.25, 1.3 + Math.sin(t * 9) * 1.2); // stutter
+    spinSpeed = Math.max(0.25, 1.4 + Math.sin(t * 9) * 1.25); // stutter
   }
   fcSpinAngle += spinSpeed * dt;
   if (fcBladeGroup) fcBladeGroup.rotation.z = fcSpinAngle;
+
   if (fcFanGroup) {
+    fcFanGroup.position.y = Math.sin(t * 1.4) * 0.14; // levitation bob
     fcFanGroup.rotation.x = wobble;
     fcFanGroup.rotation.z = wobble * 0.6;
   }
+  fcGuardRings.forEach((r, i) => {
+    r.rotation.z += (i === 0 ? 0.004 : -0.003); // counter-rotating rings
+  });
+  if (fcHubMat) {
+    fcHubMat.emissiveIntensity = 0.65 + 0.3 * Math.sin(t * 3); // core pulse
+  }
 
-  if (!fcDragActive) fcYaw += 0.0008; // gentle idle orbit
+  if (!fcDragActive) fcYaw += 0.0008;
   fcCamera.position.set(
     Math.sin(fcYaw) * CAM_DIST * Math.cos(fcPitch),
     CAM_DIST * Math.sin(fcPitch),
     Math.cos(fcYaw) * CAM_DIST * Math.cos(fcPitch)
   );
-  fcCamera.lookAt(0, -0.2, 0);
+  fcCamera.lookAt(0, -0.3, 0);
   fcRenderer.render(fcScene, fcCamera);
 }
 
