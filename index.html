@@ -7,7 +7,6 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;900&family=Share+Tech+Mono&display=swap" rel="stylesheet">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <style>
   :root {
     --void: #04070d;
@@ -204,30 +203,41 @@
   }
   .prob-row.hot .bar i { background: var(--plasma); box-shadow: 0 0 8px var(--plasma-soft); }
 
-  /* ---------- center: 3D hero ---------- */
+  /* ---------- center: fault composition chart ---------- */
   .center {
     grid-area: center;
     display: flex;
     flex-direction: column;
-    padding: 0;
+    padding: 12px 14px;
     overflow: hidden;
   }
-  .center h2 {
-    position: absolute; top: 10px; left: 14px; z-index: 3;
+  .chart-wrap { flex: 1; min-height: 0; position: relative; }
+  #fault-chart { width: 100%; height: 100%; display: block; }
+  #fault-chart .grid-line { stroke: rgba(255,255,255,0.07); stroke-width: 1; }
+  #fault-chart .axis-label { fill: var(--muted); font-size: 9px; font-family: "Share Tech Mono", monospace; }
+  #fault-chart .now-line { stroke: rgba(255,255,255,0.5); stroke-width: 1; stroke-dasharray: 3 3; }
+  #fault-chart .band-healthy { fill: #22d3ee; fill-opacity: 0.55; }
+  #fault-chart .band-imbalance { fill: #fbbf24; fill-opacity: 0.6; }
+  #fault-chart .band-obstruction { fill: #fb7185; fill-opacity: 0.65; }
+  #fault-chart .band-edge { fill: none; stroke-width: 1.4; }
+
+  .chart-legend {
+    display: flex; gap: 18px; margin-top: 8px;
+    font-size: 0.66rem; letter-spacing: 0.1em; color: var(--muted); text-transform: uppercase;
   }
-  #simplex { flex: 1; min-height: 0; cursor: grab; }
-  #simplex:active { cursor: grabbing; }
-  .center .hint {
-    position: absolute; bottom: 8px; right: 12px;
-    font-size: 0.58rem; letter-spacing: 0.16em;
-    color: var(--muted); z-index: 3; text-transform: uppercase;
+  .chart-legend .swatch {
+    display: inline-block; width: 9px; height: 9px; border-radius: 2px;
+    margin-right: 5px; vertical-align: middle;
   }
-  .center .legend {
-    position: absolute; bottom: 8px; left: 12px;
-    font-size: 0.62rem; letter-spacing: 0.1em; color: var(--muted); z-index: 3;
+  .chart-legend .sw-healthy { background: #22d3ee; }
+  .chart-legend .sw-imbalance { background: #fbbf24; }
+  .chart-legend .sw-obstruction { background: #fb7185; }
+
+  .state-readout {
+    margin-top: 6px;
+    font-size: 0.64rem; letter-spacing: 0.06em; color: var(--text);
+    text-transform: none; white-space: normal;
   }
-  .center .legend b.h { color: #34f5c5; }
-  .center .legend b.f { color: var(--plasma); }
 
   /* ---------- right column: analytics ---------- */
   .right {
@@ -463,10 +473,16 @@
   </div>
 
   <div class="panel center boot d3">
-    <h2>System State Space</h2>
-    <div id="simplex"></div>
-    <div class="legend"><b class="h">&#9650;</b> healthy &nbsp; <b class="f">&#9650;</b> imbalance / obstruction</div>
-    <div class="hint">drag to orbit</div>
+    <h2>Fault Composition &mdash; Last 100 Readings</h2>
+    <div class="chart-wrap">
+      <svg id="fault-chart" viewBox="0 0 600 260" preserveAspectRatio="none"></svg>
+    </div>
+    <div class="chart-legend">
+      <span><span class="swatch sw-healthy"></span>healthy</span>
+      <span><span class="swatch sw-imbalance"></span>imbalance</span>
+      <span><span class="swatch sw-obstruction"></span>obstruction</span>
+    </div>
+    <div class="state-readout" id="state-readout"></div>
   </div>
 
   <div class="right">
@@ -794,133 +810,83 @@ function renderAnalytics(buffer) {
 
   document.getElementById('uptime').textContent = computeUptime(window.historyRows);
 
-  updateSimplex(buffer);
+  renderFaultChart(buffer);
+  renderStateReadout(buffer);
 }
 
-/* ---------- 3D probability simplex (hero) ---------- */
-let sScene, sCamera, sRenderer, sPoint, sTrailGroup, sCorners, sRoot, sRings = [];
-let dragActive = false, dragLastX = 0, dragLastY = 0, userYaw = 0, userPitch = 0;
+/* ---------- fault composition chart (hero) ---------- */
+let faultChartInitialized = false;
 
-function initSimplex() {
-  const container = document.getElementById('simplex');
-  const width = container.clientWidth || 600;
-  const height = container.clientHeight || 380;
+function renderFaultChart(buffer) {
+  const svg = document.getElementById('fault-chart');
+  const W = 600, H = 260, padTop = 10, padBottom = 24, padLeft = 4, padRight = 4;
+  const chartH = H - padTop - padBottom;
+  const yFor = frac => padTop + (1 - frac) * chartH;
 
-  sScene = new THREE.Scene();
-  sCamera = new THREE.PerspectiveCamera(45, width / height, 0.1, 100);
-  sCamera.position.set(0, 0.35, 3.4);
-  sCamera.lookAt(0, 0, 0);
+  if (buffer.length < 2) {
+    svg.innerHTML = '<text class="axis-label" x="10" y="130">gathering readings...</text>';
+    return;
+  }
 
-  sRenderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-  sRenderer.setSize(width, height);
-  container.appendChild(sRenderer.domElement);
+  const n = buffer.length;
+  const xFor = i => padLeft + (i / (n - 1)) * (W - padLeft - padRight);
 
-  sRoot = new THREE.Group();
-  sScene.add(sRoot);
+  const healthyTop = buffer.map(r => r.healthy);
+  const imbalanceTop = buffer.map((r, i) => healthyTop[i] + r.imbalance);
+  const obstructionTop = buffer.map((r, i) => imbalanceTop[i] + r.obstruction);
 
-  sCorners = {
-    healthy: new THREE.Vector3(0, 1, 0),
-    imbalance: new THREE.Vector3(-1, -0.6, 0),
-    obstruction: new THREE.Vector3(1, -0.6, 0)
+  const band = (bottoms, tops, cls) => {
+    const top = buffer.map((r, i) => `${xFor(i).toFixed(1)},${yFor(tops[i]).toFixed(1)}`);
+    const bottom = buffer.map((r, i) => `${xFor(i).toFixed(1)},${yFor(bottoms[i]).toFixed(1)}`).reverse();
+    return `<polygon class="band-${cls}" points="${top.join(' ')} ${bottom.join(' ')}" />` +
+      `<polyline class="band-edge" style="stroke:${
+        cls === 'healthy' ? '#22d3ee' : cls === 'imbalance' ? '#fbbf24' : '#fb7185'
+      }" points="${top.join(' ')}" />`;
   };
 
-  const triGeom = new THREE.BufferGeometry().setFromPoints(
-    [sCorners.healthy, sCorners.imbalance, sCorners.obstruction, sCorners.healthy]
-  );
-  sRoot.add(new THREE.Line(triGeom, new THREE.LineBasicMaterial({ color: 0x2a4258 })));
+  const zero = buffer.map(() => 0);
+  const bandsSvg =
+    band(zero, healthyTop, 'healthy') +
+    band(healthyTop, imbalanceTop, 'imbalance') +
+    band(imbalanceTop, obstructionTop, 'obstruction');
 
-  const dotGeom = new THREE.SphereGeometry(0.05, 16, 16);
-  const hDot = new THREE.Mesh(dotGeom, new THREE.MeshBasicMaterial({ color: 0x34f5c5 }));
-  hDot.position.copy(sCorners.healthy);
-  const iDot = new THREE.Mesh(dotGeom, new THREE.MeshBasicMaterial({ color: 0xfbbf24 }));
-  iDot.position.copy(sCorners.imbalance);
-  const oDot = new THREE.Mesh(dotGeom, new THREE.MeshBasicMaterial({ color: 0xfbbf24 }));
-  oDot.position.copy(sCorners.obstruction);
-  sRoot.add(hDot, iDot, oDot);
+  const gridSvg = [0, 0.25, 0.5, 0.75, 1].map(f => {
+    const y = yFor(f).toFixed(1);
+    return `<line class="grid-line" x1="${padLeft}" y1="${y}" x2="${W - padRight}" y2="${y}" />` +
+      `<text class="axis-label" x="${padLeft + 3}" y="${(yFor(f) - 3).toFixed(1)}">${(f * 100).toFixed(0)}%</text>`;
+  }).join('');
 
-  // arc-reactor style orbit rings around the state space
-  const ringMat1 = new THREE.MeshBasicMaterial({ color: 0x22d3ee, transparent: true, opacity: 0.25 });
-  const ringMat2 = new THREE.MeshBasicMaterial({ color: 0x22d3ee, transparent: true, opacity: 0.12 });
-  const ring1 = new THREE.Mesh(new THREE.TorusGeometry(1.45, 0.006, 8, 90), ringMat1);
-  const ring2 = new THREE.Mesh(new THREE.TorusGeometry(1.62, 0.004, 8, 90), ringMat2);
-  ring1.rotation.x = Math.PI / 2.4;
-  ring2.rotation.x = -Math.PI / 3;
-  sRoot.add(ring1, ring2);
-  sRings = [ring1, ring2];
+  const nowX = xFor(n - 1).toFixed(1);
+  const nowSvg = `<line class="now-line" x1="${nowX}" y1="${padTop}" x2="${nowX}" y2="${H - padBottom + 4}" />`;
 
-  sTrailGroup = new THREE.Group();
-  sRoot.add(sTrailGroup);
+  const first = buffer[0].ts;
+  const last = buffer[n - 1].ts;
+  const timeLabels =
+    `<text class="axis-label" x="${padLeft}" y="${H - 6}">${first.toLocaleTimeString()}</text>` +
+    `<text class="axis-label" x="${W - 70}" y="${H - 6}">${last.toLocaleTimeString()}</text>`;
 
-  sPoint = new THREE.Mesh(
-    new THREE.SphereGeometry(0.07, 16, 16),
-    new THREE.MeshBasicMaterial({ color: 0xffffff })
-  );
-  sRoot.add(sPoint);
-
-  // manual orbit: drag to rotate
-  container.addEventListener('pointerdown', e => {
-    dragActive = true; dragLastX = e.clientX; dragLastY = e.clientY;
-  });
-  window.addEventListener('pointermove', e => {
-    if (!dragActive) return;
-    userYaw += (e.clientX - dragLastX) * 0.008;
-    userPitch += (e.clientY - dragLastY) * 0.005;
-    userPitch = Math.max(-0.9, Math.min(0.9, userPitch));
-    dragLastX = e.clientX; dragLastY = e.clientY;
-  });
-  window.addEventListener('pointerup', () => { dragActive = false; });
-
-  window.addEventListener('resize', () => {
-    const w = container.clientWidth, h = container.clientHeight;
-    if (!w || !h) return;
-    sCamera.aspect = w / h;
-    sCamera.updateProjectionMatrix();
-    sRenderer.setSize(w, h);
-  });
-
-  animateSimplex();
+  svg.innerHTML = gridSvg + bandsSvg + nowSvg + timeLabels;
 }
 
-function barycentricPosition(healthy, imbalance, obstruction) {
-  return new THREE.Vector3()
-    .addScaledVector(sCorners.healthy, healthy)
-    .addScaledVector(sCorners.imbalance, imbalance)
-    .addScaledVector(sCorners.obstruction, obstruction);
-}
-
-function updateSimplex(buffer) {
-  if (!sScene || buffer.length === 0) return;
-
-  const trailPoints = buffer.slice(-12);
-  while (sTrailGroup.children.length) {
-    const m = sTrailGroup.children.pop();
-    m.geometry.dispose();
-    m.material.dispose();
-  }
-  trailPoints.forEach((r, i) => {
-    const pos = barycentricPosition(r.healthy, r.imbalance, r.obstruction);
-    const t = (i + 1) / trailPoints.length;
-    const mesh = new THREE.Mesh(
-      new THREE.SphereGeometry(0.022 + 0.024 * t, 8, 8),
-      new THREE.MeshBasicMaterial({ color: 0x22d3ee, transparent: true, opacity: 0.12 + 0.6 * t })
-    );
-    mesh.position.copy(pos);
-    sTrailGroup.add(mesh);
-  });
-
+function renderStateReadout(buffer) {
+  const el = document.getElementById('state-readout');
   const latest = buffer[buffer.length - 1];
-  sPoint.position.copy(barycentricPosition(latest.healthy, latest.imbalance, latest.obstruction));
-  sPoint.material.color.set(faultClass(latest.cls) === 'healthy' ? 0xffffff : 0xfbbf24);
-}
+  const spanMs = buffer[buffer.length - 1].ts.getTime() - buffer[0].ts.getTime();
+  const spanLabel = buffer.length < 3 ? 'gathering data' : formatDuration(spanMs) + ' span';
 
-function animateSimplex() {
-  requestAnimationFrame(animateSimplex);
-  if (!sScene) return;
-  if (!dragActive) userYaw += 0.0022; // slow idle spin
-  sRoot.rotation.y = userYaw;
-  sRoot.rotation.x = userPitch;
-  sRings.forEach((r, i) => { r.rotation.z += 0.003 * (i + 1); });
-  sRenderer.render(sScene, sCamera);
+  let trend = 'holding steady';
+  if (buffer.length >= 9) {
+    const third = Math.max(1, Math.floor(buffer.length / 3));
+    const avg = arr => arr.reduce((a, b) => a + b, 0) / arr.length;
+    const early = avg(buffer.slice(0, third).map(r => r.healthy));
+    const recent = avg(buffer.slice(-third).map(r => r.healthy));
+    const delta = recent - early;
+    if (delta > 0.05) trend = 'moving toward healthy';
+    else if (delta < -0.05) trend = 'drifting toward a fault';
+  }
+
+  el.textContent = `${buffer.length} readings \u00b7 ${spanLabel} \u00b7 ${trend} \u00b7 ` +
+    `now ${(latest.confidence * 100).toFixed(0)}% ${latest.cls}`;
 }
 
 /* ---------- Gemini explain ---------- */
@@ -1029,7 +995,6 @@ async function load() {
   }
 }
 
-initSimplex();
 load();
 pollLive();
 setInterval(pollLive, LIVE_POLL_MS);
