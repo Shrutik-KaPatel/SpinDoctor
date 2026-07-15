@@ -2,88 +2,947 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>SpinDoctor — Diagnostics Log</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SPINDOCTOR // HUD</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;900&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <style>
   :root {
-    --bg: #0f1115;
-    --panel: #161922;
-    --border: #262b36;
-    --text: #e4e7ec;
-    --muted: #8b92a3;
-    --accent: #5eead4;
-    --warn: #f5a623;
+    --void: #04070d;
+    --void-2: #070d18;
+    --panel: rgba(10, 20, 34, 0.72);
+    --accent: #22d3ee;          /* arc reactor cyan */
+    --accent-soft: rgba(34, 211, 238, 0.35);
+    --accent-faint: rgba(34, 211, 238, 0.12);
+    --plasma: #fbbf24;          /* fault amber */
+    --plasma-soft: rgba(251, 191, 36, 0.35);
+    --critical: #f43f5e;
+    --text: #d8f4ff;
+    --muted: #5f7f96;
+    --grid-line: rgba(34, 211, 238, 0.045);
   }
-  * { box-sizing: border-box; }
+  body.alert {
+    --accent: #fbbf24;
+    --accent-soft: rgba(251, 191, 36, 0.4);
+    --accent-faint: rgba(251, 191, 36, 0.12);
+    --grid-line: rgba(251, 191, 36, 0.05);
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body { height: 100%; }
   body {
-    margin: 0;
-    background: var(--bg);
+    background:
+      radial-gradient(ellipse 80% 60% at 50% 40%, var(--void-2), var(--void) 70%),
+      var(--void);
     color: var(--text);
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    padding: 40px 24px;
+    font-family: "Share Tech Mono", ui-monospace, monospace;
+    overflow: hidden;
+    position: relative;
+    transition: --accent 0.5s;
   }
-  .wrap { max-width: 720px; margin: 0 auto; }
-  h1 { font-size: 1.4rem; letter-spacing: 0.02em; margin: 0 0 4px; }
-  .sub { color: var(--muted); font-size: 0.85rem; margin-bottom: 24px; }
-  .status { font-family: ui-monospace, monospace; font-size: 0.8rem; color: var(--muted); margin-bottom: 16px; }
-  button {
+  /* holo grid floor */
+  body::before {
+    content: "";
+    position: fixed; inset: 0;
+    background-image:
+      linear-gradient(var(--grid-line) 1px, transparent 1px),
+      linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+    background-size: 48px 48px;
+    pointer-events: none;
+    z-index: 0;
+  }
+  /* scanlines */
+  body::after {
+    content: "";
+    position: fixed; inset: 0;
+    background: repeating-linear-gradient(0deg, rgba(0,0,0,0.22) 0 1px, transparent 1px 3px);
+    pointer-events: none;
+    z-index: 100;
+    opacity: 0.5;
+  }
+
+  .hud {
+    position: relative;
+    z-index: 1;
+    height: 100vh;
+    display: grid;
+    grid-template-columns: 290px 1fr 310px;
+    grid-template-rows: 58px 1fr 218px 26px;
+    grid-template-areas:
+      "header header header"
+      "left   center right"
+      "bottom bottom bottom"
+      "footer footer footer";
+    gap: 10px;
+    padding: 12px 14px 6px;
+  }
+
+  /* ---------- panels ---------- */
+  .panel {
     background: var(--panel);
-    border: 1px solid var(--border);
-    color: var(--text);
-    padding: 6px 14px;
-    border-radius: 6px;
-    font-size: 0.85rem;
-    cursor: pointer;
+    border: 1px solid var(--accent-faint);
+    position: relative;
+    backdrop-filter: blur(2px);
+    padding: 12px 14px;
+    min-height: 0;
+    min-width: 0;
+    box-shadow: inset 0 0 24px rgba(0,0,0,0.35);
   }
-  button:hover { border-color: var(--accent); color: var(--accent); }
-  table { width: 100%; border-collapse: collapse; margin-top: 16px; font-size: 0.85rem; }
-  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
-  th { color: var(--muted); font-weight: 500; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em; }
-  td.fault-healthy { color: var(--accent); }
-  td.fault-imbalance, td.fault-obstruction { color: var(--warn); }
-  tr:first-child td { font-weight: 600; }
-  .empty { color: var(--muted); padding: 24px 0; text-align: center; }
+  /* corner brackets */
+  .panel::before, .panel::after {
+    content: "";
+    position: absolute;
+    width: 14px; height: 14px;
+    border-color: var(--accent);
+    border-style: solid;
+    opacity: 0.85;
+  }
+  .panel::before { top: -1px; left: -1px; border-width: 2px 0 0 2px; }
+  .panel::after  { bottom: -1px; right: -1px; border-width: 0 2px 2px 0; }
+
+  .panel h2 {
+    font-family: "Orbitron", sans-serif;
+    font-size: 0.6rem;
+    font-weight: 700;
+    letter-spacing: 0.28em;
+    color: var(--accent);
+    text-transform: uppercase;
+    margin-bottom: 10px;
+    text-shadow: 0 0 8px var(--accent-soft);
+  }
+
+  /* ---------- header ---------- */
+  header {
+    grid-area: header;
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    padding: 0 16px;
+    border: 1px solid var(--accent-faint);
+    background: var(--panel);
+  }
+  .brand {
+    font-family: "Orbitron", sans-serif;
+    font-weight: 900;
+    font-size: 1.15rem;
+    letter-spacing: 0.32em;
+    color: var(--text);
+    text-shadow: 0 0 14px var(--accent-soft);
+  }
+  .brand span { color: var(--accent); }
+  .sysline {
+    flex: 1;
+    font-size: 0.68rem;
+    letter-spacing: 0.14em;
+    color: var(--muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .sysline .ok { color: var(--accent); }
+  .clock {
+    font-family: "Orbitron", sans-serif;
+    font-size: 0.8rem;
+    letter-spacing: 0.18em;
+    color: var(--accent);
+    text-shadow: 0 0 10px var(--accent-soft);
+  }
+  .live-dot {
+    width: 9px; height: 9px; border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 10px var(--accent);
+    animation: pulse 1.6s ease-in-out infinite;
+  }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.25; } }
+
+  /* ---------- left column: readouts ---------- */
+  .left {
+    grid-area: left;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .readout { flex: 1; display: flex; flex-direction: column; justify-content: center; }
+  .readout .label {
+    font-size: 0.6rem;
+    letter-spacing: 0.24em;
+    color: var(--muted);
+    text-transform: uppercase;
+    margin-bottom: 4px;
+  }
+  .readout .value {
+    font-family: "Orbitron", sans-serif;
+    font-size: 1.7rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    color: var(--text);
+    text-shadow: 0 0 16px var(--accent-soft);
+  }
+  .readout .value.fault-healthy { color: #34f5c5; }
+  .readout .value.fault-imbalance, .readout .value.fault-obstruction { color: var(--plasma); text-shadow: 0 0 16px var(--plasma-soft); }
+
+  .prob-row { margin-top: 7px; }
+  .prob-row .prob-label {
+    display: flex; justify-content: space-between;
+    font-size: 0.62rem; letter-spacing: 0.12em; color: var(--muted);
+    text-transform: uppercase;
+  }
+  .prob-row .bar {
+    height: 4px; margin-top: 3px;
+    background: rgba(255,255,255,0.06);
+    position: relative; overflow: hidden;
+  }
+  .prob-row .bar i {
+    position: absolute; inset: 0 auto 0 0;
+    width: 0%;
+    background: var(--accent);
+    box-shadow: 0 0 8px var(--accent-soft);
+    transition: width 0.6s ease;
+  }
+  .prob-row.hot .bar i { background: var(--plasma); box-shadow: 0 0 8px var(--plasma-soft); }
+
+  /* ---------- center: 3D hero ---------- */
+  .center {
+    grid-area: center;
+    display: flex;
+    flex-direction: column;
+    padding: 0;
+    overflow: hidden;
+  }
+  .center h2 {
+    position: absolute; top: 10px; left: 14px; z-index: 3;
+  }
+  #simplex { flex: 1; min-height: 0; cursor: grab; }
+  #simplex:active { cursor: grabbing; }
+  .center .hint {
+    position: absolute; bottom: 8px; right: 12px;
+    font-size: 0.58rem; letter-spacing: 0.16em;
+    color: var(--muted); z-index: 3; text-transform: uppercase;
+  }
+  .center .legend {
+    position: absolute; bottom: 8px; left: 12px;
+    font-size: 0.62rem; letter-spacing: 0.1em; color: var(--muted); z-index: 3;
+  }
+  .center .legend b.h { color: #34f5c5; }
+  .center .legend b.f { color: var(--plasma); }
+
+  /* ---------- right column: analytics ---------- */
+  .right {
+    grid-area: right;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    overflow: hidden;
+  }
+  .health-panel { display: flex; align-items: center; gap: 14px; }
+  .ring-wrap { position: relative; width: 92px; height: 92px; flex-shrink: 0; }
+  .ring-wrap svg { transform: rotate(-90deg); }
+  .ring-bg { fill: none; stroke: rgba(255,255,255,0.07); stroke-width: 7; }
+  .ring-fg {
+    fill: none; stroke: var(--accent); stroke-width: 7;
+    stroke-linecap: round;
+    filter: drop-shadow(0 0 6px var(--accent-soft));
+    transition: stroke-dashoffset 0.8s ease, stroke 0.4s;
+  }
+  .ring-num {
+    position: absolute; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    font-family: "Orbitron", sans-serif;
+    font-size: 1.35rem; font-weight: 700;
+  }
+  .health-meta { font-size: 0.62rem; letter-spacing: 0.14em; color: var(--muted); line-height: 1.9; text-transform: uppercase; }
+  .health-meta b { color: var(--text); font-weight: 400; }
+
+  .stats { flex: 1; display: flex; flex-direction: column; gap: 6px; overflow: hidden; }
+  .stat {
+    display: flex; justify-content: space-between; align-items: baseline;
+    font-size: 0.66rem; letter-spacing: 0.12em;
+    color: var(--muted); text-transform: uppercase;
+    border-bottom: 1px dashed rgba(255,255,255,0.06);
+    padding-bottom: 5px;
+  }
+  .stat b {
+    font-family: "Orbitron", sans-serif;
+    font-size: 0.82rem; font-weight: 500;
+    color: var(--text); letter-spacing: 0.05em;
+  }
+  #spark-panel { padding-bottom: 8px; }
+  #confidence-sparkline polyline {
+    stroke: var(--accent);
+    filter: drop-shadow(0 0 4px var(--accent-soft));
+  }
+  #sensor-status { font-size: 0.62rem; color: var(--critical); letter-spacing: 0.08em; min-height: 14px; margin-top: 4px; }
+
+  /* ---------- bottom strip ---------- */
+  .bottom {
+    grid-area: bottom;
+    display: grid;
+    grid-template-columns: 1.2fr 1fr 1fr;
+    gap: 10px;
+    min-height: 0;
+  }
+  .bottom .panel { display: flex; flex-direction: column; overflow: hidden; }
+
+  .terminal {
+    flex: 1; min-height: 0;
+    overflow-y: auto;
+    font-size: 0.66rem;
+    line-height: 1.7;
+    color: #6ee7d6;
+  }
+  .terminal div { white-space: pre; }
+  .terminal .imbalance, .terminal .obstruction { color: var(--plasma); }
+  .terminal::-webkit-scrollbar, .history-scroll::-webkit-scrollbar { width: 4px; }
+  .terminal::-webkit-scrollbar-thumb, .history-scroll::-webkit-scrollbar-thumb { background: var(--accent-soft); }
+
+  button {
+    font-family: "Orbitron", sans-serif;
+    font-size: 0.6rem; font-weight: 700;
+    letter-spacing: 0.22em; text-transform: uppercase;
+    background: transparent;
+    color: var(--accent);
+    border: 1px solid var(--accent-soft);
+    padding: 7px 12px;
+    cursor: pointer;
+    transition: all 0.2s;
+    text-shadow: 0 0 8px var(--accent-soft);
+  }
+  button:hover { background: var(--accent-faint); box-shadow: 0 0 14px var(--accent-faint); }
+  button:disabled { opacity: 0.4; cursor: default; }
+
+  .microstatus { font-size: 0.6rem; color: var(--muted); letter-spacing: 0.08em; margin-top: 6px; line-height: 1.6; }
+  .explain-box {
+    flex: 1; min-height: 0; overflow-y: auto;
+    margin-top: 8px;
+    font-size: 0.7rem; line-height: 1.6;
+    color: var(--text);
+    white-space: pre-wrap;
+  }
+
+  .history-scroll { flex: 1; min-height: 0; overflow-y: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.64rem; }
+  th, td { text-align: left; padding: 4px 6px; border-bottom: 1px solid rgba(255,255,255,0.05); }
+  th {
+    color: var(--muted); font-weight: 400; font-size: 0.56rem;
+    text-transform: uppercase; letter-spacing: 0.12em;
+    position: sticky; top: 0; background: #0a1422;
+  }
+  td.fault-healthy { color: #34f5c5; }
+  td.fault-imbalance, td.fault-obstruction { color: var(--plasma); }
+  .empty { color: var(--muted); padding: 14px 0; text-align: center; font-size: 0.66rem; }
+
+  /* ---------- footer / watermark ---------- */
+  footer {
+    grid-area: footer;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 0.56rem;
+    letter-spacing: 0.24em;
+    color: var(--muted);
+    text-transform: uppercase;
+    padding: 0 6px;
+  }
+  .watermark {
+    font-family: "Orbitron", sans-serif;
+    font-weight: 700;
+    color: var(--accent);
+    opacity: 0.75;
+    text-shadow: 0 0 10px var(--accent-soft);
+  }
+
+  /* ---------- boot sequence ---------- */
+  .boot { animation: bootIn 0.55s ease both; }
+  .boot.d1 { animation-delay: 0.08s; }
+  .boot.d2 { animation-delay: 0.18s; }
+  .boot.d3 { animation-delay: 0.28s; }
+  .boot.d4 { animation-delay: 0.38s; }
+  .boot.d5 { animation-delay: 0.48s; }
+  @keyframes bootIn {
+    0% { opacity: 0; transform: translateY(6px); }
+    55% { opacity: 0.6; }
+    70% { opacity: 0.25; }
+    100% { opacity: 1; transform: translateY(0); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .boot, .live-dot { animation: none !important; }
+    body::after { display: none; }
+  }
+
+  /* ---------- small screens: fall back to scroll ---------- */
+  @media (max-width: 980px), (max-height: 640px) {
+    body { overflow: auto; }
+    .hud {
+      height: auto;
+      grid-template-columns: 1fr;
+      grid-template-areas: "header" "left" "center" "right" "bottom" "footer";
+    }
+    .center { min-height: 320px; }
+    .bottom { grid-template-columns: 1fr; }
+    .bottom .panel { min-height: 200px; }
+  }
 </style>
 </head>
 <body>
-  <div class="wrap">
-    <h1>SpinDoctor</h1>
-    <div class="sub">Diagnostics log — pulled live from Google Sheets</div>
-    <div class="status" id="status">loading…</div>
-    <button onclick="load()">Refresh</button>
-    <table id="table" style="display:none">
-      <thead><tr id="head"></tr></thead>
-      <tbody id="body"></tbody>
-    </table>
-    <div class="empty" id="empty" style="display:none">No readings logged yet.</div>
+<div class="hud">
+
+  <header class="boot">
+    <div class="live-dot"></div>
+    <div class="brand">SPIN<span>DOCTOR</span></div>
+    <div class="sysline" id="sysline">INITIALIZING TELEMETRY LINK...</div>
+    <div class="clock" id="clock">--:--:--</div>
+  </header>
+
+  <div class="left">
+    <div class="panel readout boot d1">
+      <div class="label">Fault Class</div>
+      <div class="value" id="live-class">--</div>
+    </div>
+    <div class="panel readout boot d1">
+      <div class="label">Confidence</div>
+      <div class="value" id="live-confidence">--</div>
+    </div>
+    <div class="panel readout boot d2">
+      <div class="label">Core Temp</div>
+      <div class="value" id="live-temp">--</div>
+    </div>
+    <div class="panel boot d2">
+      <h2>Class Probabilities</h2>
+      <div class="prob-row" id="prob-healthy">
+        <div class="prob-label"><span>healthy</span><span class="pv">--</span></div>
+        <div class="bar"><i></i></div>
+      </div>
+      <div class="prob-row hot" id="prob-imbalance">
+        <div class="prob-label"><span>imbalance</span><span class="pv">--</span></div>
+        <div class="bar"><i></i></div>
+      </div>
+      <div class="prob-row hot" id="prob-obstruction">
+        <div class="prob-label"><span>obstruction</span><span class="pv">--</span></div>
+        <div class="bar"><i></i></div>
+      </div>
+    </div>
   </div>
 
+  <div class="panel center boot d3">
+    <h2>System State Space</h2>
+    <div id="simplex"></div>
+    <div class="legend"><b class="h">&#9650;</b> healthy &nbsp; <b class="f">&#9650;</b> imbalance / obstruction</div>
+    <div class="hint">drag to orbit</div>
+  </div>
+
+  <div class="right">
+    <div class="panel health-panel boot d3">
+      <div class="ring-wrap">
+        <svg width="92" height="92" viewBox="0 0 92 92">
+          <circle class="ring-bg" cx="46" cy="46" r="39"></circle>
+          <circle class="ring-fg" id="health-ring" cx="46" cy="46" r="39"
+                  stroke-dasharray="245" stroke-dashoffset="245"></circle>
+        </svg>
+        <div class="ring-num" id="health-score">--</div>
+      </div>
+      <div class="health-meta">
+        Equipment<br>Health Index<br>
+        uptime <b id="uptime">--</b>
+      </div>
+    </div>
+    <div class="panel stats boot d4">
+      <h2>Signal Analytics</h2>
+      <div class="stat"><span>margin top vs 2nd</span><b id="margin">--</b></div>
+      <div class="stat"><span>flapping / last 20</span><b id="flap-count">--</b></div>
+      <div class="stat"><span>temp slope</span><b id="temp-slope">--</b></div>
+      <div class="stat"><span>avg t healthy</span><b id="t-healthy">--</b></div>
+      <div class="stat"><span>avg t imbalance</span><b id="t-imbalance">--</b></div>
+      <div class="stat"><span>avg t obstruction</span><b id="t-obstruction">--</b></div>
+      <div id="sensor-status"></div>
+    </div>
+    <div class="panel boot d4" id="spark-panel">
+      <h2>Confidence Trend</h2>
+      <svg id="confidence-sparkline" width="100%" height="46" viewBox="0 0 300 46" preserveAspectRatio="none"></svg>
+    </div>
+  </div>
+
+  <div class="bottom">
+    <div class="panel boot d4">
+      <h2>Telemetry Stream</h2>
+      <div class="terminal" id="terminal"></div>
+      <div class="microstatus" id="live-status">connecting...</div>
+    </div>
+    <div class="panel boot d5">
+      <h2>AI Analysis // Gemini</h2>
+      <button id="explain-btn" onclick="requestExplanation()">Explain current reading</button>
+      <div class="microstatus" id="explain-context"></div>
+      <div class="microstatus" id="explain-status"></div>
+      <div class="explain-box" id="explain-result"></div>
+    </div>
+    <div class="panel boot d5">
+      <h2>Fault History</h2>
+      <button onclick="load()">Refresh</button>
+      <div class="history-scroll">
+        <table id="table" style="display:none">
+          <thead><tr id="head"></tr></thead>
+          <tbody id="body"></tbody>
+        </table>
+        <div class="empty" id="empty" style="display:none">No readings logged yet.</div>
+      </div>
+      <div class="microstatus" id="status">loading...</div>
+    </div>
+  </div>
+
+  <footer class="boot d5">
+    <span>SPINDOCTOR // EDGE-TO-CLOUD PREDICTIVE MAINTENANCE // STM32 + ESP32 + NANOEDGE AI</span>
+    <span class="watermark">DESIGNED BY SHRUTIK</span>
+  </footer>
+
+</div>
 <script>
 const ENDPOINT = 'https://script.google.com/macros/s/AKfycbwybMfmNkcJr13etcb2Gt6GcHDdKg6KT9faJbAHrI92y__-Ti73OX6MKpL_-6UCHf_MVg/exec';
+const LIVE_POLL_MS = 2500;
+const TERMINAL_MAX_LINES = 50;
+const EXPLAIN_POLL_MS = 3000;
+const SENSOR_GLITCH_THRESHOLD_C = 3;
+
+let lastLiveTimestampMs = null;
+let lastKnownReading = null;
+let explainPolling = null;
+let explainBaseline = null;
 
 function faultClass(value) {
   return (value || '').toString().toLowerCase().trim().replace(/\s+/g, '-');
 }
 
+/* ---------- clock ---------- */
+setInterval(() => {
+  document.getElementById('clock').textContent = new Date().toLocaleTimeString();
+}, 1000);
+
+/* ---------- live poll ---------- */
+async function pollLive() {
+  const liveStatus = document.getElementById('live-status');
+  try {
+    const res = await fetch(ENDPOINT + '?action=get_live');
+    const rows = await res.json();
+    if (!rows || rows.length < 2) {
+      liveStatus.textContent = 'connected, no live data yet';
+      return;
+    }
+
+    const [, ...dataRows] = rows;
+
+    // Guard against partially-written rows (read overlapping an ESP32
+    // write mid ring-buffer update): parse, then drop anything unclean.
+    const buffer = dataRows
+      .map(r => ({
+        ts: new Date(r[0]),
+        cls: r[1],
+        confidence: Number(r[2]),
+        healthy: Number(r[3]),
+        imbalance: Number(r[4]),
+        obstruction: Number(r[5]),
+        temp_c: Number(r[6])
+      }))
+      .filter(r => r.cls && !isNaN(r.ts.getTime()) && !isNaN(r.confidence) && !isNaN(r.temp_c));
+
+    if (buffer.length === 0) {
+      liveStatus.textContent = 'connected, skipped malformed rows';
+      return;
+    }
+
+    const latest = buffer[buffer.length - 1];
+    const clsSlug = faultClass(latest.cls);
+
+    // HUD alert mode: whole color scheme shifts amber on a live fault
+    document.body.classList.toggle('alert', clsSlug !== 'healthy');
+
+    const classEl = document.getElementById('live-class');
+    classEl.textContent = latest.cls.toUpperCase();
+    classEl.className = 'value fault-' + clsSlug;
+
+    document.getElementById('live-confidence').textContent = (latest.confidence * 100).toFixed(0) + '%';
+    document.getElementById('live-temp').textContent = latest.temp_c.toFixed(1) + '\u00b0C';
+
+    setProb('prob-healthy', latest.healthy);
+    setProb('prob-imbalance', latest.imbalance);
+    setProb('prob-obstruction', latest.obstruction);
+
+    document.getElementById('sysline').innerHTML =
+      'TELEMETRY LINK <span class="ok">ACTIVE</span> // STM32 CORE // NANOEDGE SVM // ' +
+      buffer.length + ' READINGS BUFFERED';
+    liveStatus.textContent = 'link active - last update ' + new Date().toLocaleTimeString();
+
+    if (latest.ts.getTime() !== lastLiveTimestampMs) {
+      lastLiveTimestampMs = latest.ts.getTime();
+      appendTerminalLine(latest);
+    }
+
+    lastKnownReading = latest;
+    renderAnalytics(buffer);
+  } catch (err) {
+    liveStatus.textContent = 'live fetch failed: ' + err.message;
+  }
+}
+
+function setProb(id, value) {
+  const row = document.getElementById(id);
+  row.querySelector('.pv').textContent = (value * 100).toFixed(0) + '%';
+  row.querySelector('.bar i').style.width = (value * 100).toFixed(1) + '%';
+}
+
+function appendTerminalLine(r) {
+  const term = document.getElementById('terminal');
+  const line = document.createElement('div');
+  const clsSlug = faultClass(r.cls);
+  if (clsSlug === 'imbalance' || clsSlug === 'obstruction') line.className = clsSlug;
+  const t = r.ts.toLocaleTimeString();
+  line.textContent = `[${t}] fault_class=${r.cls} confidence=${r.confidence.toFixed(2)} ` +
+    `healthy=${r.healthy.toFixed(2)} imbalance=${r.imbalance.toFixed(2)} ` +
+    `obstruction=${r.obstruction.toFixed(2)} temp_c=${r.temp_c.toFixed(1)}`;
+  term.appendChild(line);
+  while (term.children.length > TERMINAL_MAX_LINES) {
+    term.removeChild(term.firstChild);
+  }
+  term.scrollTop = term.scrollHeight;
+}
+
+/* ---------- analytics ---------- */
+function computeMargin(row) {
+  const probs = [row.healthy, row.imbalance, row.obstruction].sort((a, b) => b - a);
+  return probs[0] - probs[1];
+}
+
+function computeFlapCount(buffer, windowSize) {
+  const recent = buffer.slice(-windowSize);
+  let count = 0;
+  for (let i = 1; i < recent.length; i++) {
+    if (faultClass(recent[i].cls) !== faultClass(recent[i - 1].cls)) count++;
+  }
+  return count;
+}
+
+function computeTempSlope(buffer) {
+  if (buffer.length < 2) return null;
+  const t0 = buffer[0].ts.getTime();
+  const xs = buffer.map(r => (r.ts.getTime() - t0) / 60000);
+  const ys = buffer.map(r => r.temp_c);
+  const n = xs.length;
+  const sumX = xs.reduce((a, b) => a + b, 0);
+  const sumY = ys.reduce((a, b) => a + b, 0);
+  const sumXY = xs.reduce((a, x, i) => a + x * ys[i], 0);
+  const sumXX = xs.reduce((a, x) => a + x * x, 0);
+  const denom = n * sumXX - sumX * sumX;
+  if (denom === 0) return 0;
+  return (n * sumXY - sumX * sumY) / denom;
+}
+
+function computeTempByClass(buffer) {
+  const groups = {};
+  buffer.forEach(r => {
+    const key = faultClass(r.cls);
+    (groups[key] = groups[key] || []).push(r.temp_c);
+  });
+  const avg = arr => arr.reduce((a, b) => a + b, 0) / arr.length;
+  return {
+    healthy: groups.healthy ? avg(groups.healthy) : null,
+    imbalance: groups.imbalance ? avg(groups.imbalance) : null,
+    obstruction: groups.obstruction ? avg(groups.obstruction) : null
+  };
+}
+
+function computeHealthScore(buffer) {
+  if (buffer.length === 0) return null;
+  const latest = buffer[buffer.length - 1];
+  const confidenceScore = latest.confidence * 100;
+  const marginScore = computeMargin(latest) * 100;
+  const flaps = computeFlapCount(buffer, 20);
+  const stabilityScore = Math.max(0, 100 - flaps * 10);
+  const slope = computeTempSlope(buffer.slice(-20)) || 0;
+  const tempStabilityScore = Math.max(0, 100 - Math.min(100, Math.abs(slope) * 40));
+  const score = 0.35 * confidenceScore + 0.25 * marginScore + 0.2 * stabilityScore + 0.2 * tempStabilityScore;
+  return Math.round(Math.max(0, Math.min(100, score)));
+}
+
+function detectSensorGlitch(buffer) {
+  if (buffer.length < 2) return false;
+  const a = buffer[buffer.length - 2].temp_c;
+  const b = buffer[buffer.length - 1].temp_c;
+  return Math.abs(b - a) > SENSOR_GLITCH_THRESHOLD_C;
+}
+
+function computeUptime(historyRows) {
+  if (!historyRows || historyRows.length === 0) return '--';
+  for (let i = historyRows.length - 1; i >= 0; i--) {
+    if (faultClass(historyRows[i][1]) !== 'healthy') {
+      const faultTime = new Date(historyRows[i][0]);
+      if (isNaN(faultTime.getTime())) continue;
+      return formatDuration(Date.now() - faultTime.getTime());
+    }
+  }
+  return 'no faults';
+}
+
+function formatDuration(ms) {
+  const totalMin = Math.max(0, Math.floor(ms / 60000));
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin % 60;
+  return h > 0 ? `${h}h ${m}m` : `${m}m`;
+}
+
+function renderSparkline(values) {
+  const svg = document.getElementById('confidence-sparkline');
+  if (values.length < 2) { svg.innerHTML = ''; return; }
+  const w = 300, h = 46, pad = 4;
+  const points = values.map((v, i) => {
+    const x = (i / (values.length - 1)) * w;
+    const y = h - pad - v * (h - pad * 2);
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(' ');
+  svg.innerHTML = `<polyline points="${points}" fill="none" stroke-width="2" />`;
+}
+
+function renderAnalytics(buffer) {
+  renderSparkline(buffer.map(r => r.confidence));
+
+  const latest = buffer[buffer.length - 1];
+  document.getElementById('margin').textContent = (computeMargin(latest) * 100).toFixed(0) + '%';
+  document.getElementById('flap-count').textContent = computeFlapCount(buffer, 20);
+
+  const slope = computeTempSlope(buffer);
+  document.getElementById('temp-slope').textContent =
+    slope === null ? '--' : (slope >= 0 ? '+' : '') + slope.toFixed(2) + '\u00b0C/m';
+
+  const byClass = computeTempByClass(buffer);
+  document.getElementById('t-healthy').textContent = byClass.healthy !== null ? byClass.healthy.toFixed(1) + '\u00b0C' : '--';
+  document.getElementById('t-imbalance').textContent = byClass.imbalance !== null ? byClass.imbalance.toFixed(1) + '\u00b0C' : '--';
+  document.getElementById('t-obstruction').textContent = byClass.obstruction !== null ? byClass.obstruction.toFixed(1) + '\u00b0C' : '--';
+
+  const score = computeHealthScore(buffer);
+  const scoreEl = document.getElementById('health-score');
+  const ring = document.getElementById('health-ring');
+  if (score === null) {
+    scoreEl.textContent = '--';
+    ring.style.strokeDashoffset = 245;
+  } else {
+    scoreEl.textContent = score;
+    ring.style.strokeDashoffset = 245 - (245 * score / 100);
+    const color = score >= 80 ? '#22d3ee' : score >= 50 ? '#fbbf24' : '#f43f5e';
+    ring.style.stroke = color;
+    scoreEl.style.color = color;
+  }
+
+  document.getElementById('sensor-status').textContent = detectSensorGlitch(buffer)
+    ? '\u26a0 SENSOR GLITCH SUSPECTED: implausible temp jump'
+    : '';
+
+  document.getElementById('uptime').textContent = computeUptime(window.historyRows);
+
+  updateSimplex(buffer);
+}
+
+/* ---------- 3D probability simplex (hero) ---------- */
+let sScene, sCamera, sRenderer, sPoint, sTrailGroup, sCorners, sRoot, sRings = [];
+let dragActive = false, dragLastX = 0, dragLastY = 0, userYaw = 0, userPitch = 0;
+
+function initSimplex() {
+  const container = document.getElementById('simplex');
+  const width = container.clientWidth || 600;
+  const height = container.clientHeight || 380;
+
+  sScene = new THREE.Scene();
+  sCamera = new THREE.PerspectiveCamera(45, width / height, 0.1, 100);
+  sCamera.position.set(0, 0.35, 3.4);
+  sCamera.lookAt(0, 0, 0);
+
+  sRenderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+  sRenderer.setSize(width, height);
+  container.appendChild(sRenderer.domElement);
+
+  sRoot = new THREE.Group();
+  sScene.add(sRoot);
+
+  sCorners = {
+    healthy: new THREE.Vector3(0, 1, 0),
+    imbalance: new THREE.Vector3(-1, -0.6, 0),
+    obstruction: new THREE.Vector3(1, -0.6, 0)
+  };
+
+  const triGeom = new THREE.BufferGeometry().setFromPoints(
+    [sCorners.healthy, sCorners.imbalance, sCorners.obstruction, sCorners.healthy]
+  );
+  sRoot.add(new THREE.Line(triGeom, new THREE.LineBasicMaterial({ color: 0x2a4258 })));
+
+  const dotGeom = new THREE.SphereGeometry(0.05, 16, 16);
+  const hDot = new THREE.Mesh(dotGeom, new THREE.MeshBasicMaterial({ color: 0x34f5c5 }));
+  hDot.position.copy(sCorners.healthy);
+  const iDot = new THREE.Mesh(dotGeom, new THREE.MeshBasicMaterial({ color: 0xfbbf24 }));
+  iDot.position.copy(sCorners.imbalance);
+  const oDot = new THREE.Mesh(dotGeom, new THREE.MeshBasicMaterial({ color: 0xfbbf24 }));
+  oDot.position.copy(sCorners.obstruction);
+  sRoot.add(hDot, iDot, oDot);
+
+  // arc-reactor style orbit rings around the state space
+  const ringMat1 = new THREE.MeshBasicMaterial({ color: 0x22d3ee, transparent: true, opacity: 0.25 });
+  const ringMat2 = new THREE.MeshBasicMaterial({ color: 0x22d3ee, transparent: true, opacity: 0.12 });
+  const ring1 = new THREE.Mesh(new THREE.TorusGeometry(1.45, 0.006, 8, 90), ringMat1);
+  const ring2 = new THREE.Mesh(new THREE.TorusGeometry(1.62, 0.004, 8, 90), ringMat2);
+  ring1.rotation.x = Math.PI / 2.4;
+  ring2.rotation.x = -Math.PI / 3;
+  sRoot.add(ring1, ring2);
+  sRings = [ring1, ring2];
+
+  sTrailGroup = new THREE.Group();
+  sRoot.add(sTrailGroup);
+
+  sPoint = new THREE.Mesh(
+    new THREE.SphereGeometry(0.07, 16, 16),
+    new THREE.MeshBasicMaterial({ color: 0xffffff })
+  );
+  sRoot.add(sPoint);
+
+  // manual orbit: drag to rotate
+  container.addEventListener('pointerdown', e => {
+    dragActive = true; dragLastX = e.clientX; dragLastY = e.clientY;
+  });
+  window.addEventListener('pointermove', e => {
+    if (!dragActive) return;
+    userYaw += (e.clientX - dragLastX) * 0.008;
+    userPitch += (e.clientY - dragLastY) * 0.005;
+    userPitch = Math.max(-0.9, Math.min(0.9, userPitch));
+    dragLastX = e.clientX; dragLastY = e.clientY;
+  });
+  window.addEventListener('pointerup', () => { dragActive = false; });
+
+  window.addEventListener('resize', () => {
+    const w = container.clientWidth, h = container.clientHeight;
+    if (!w || !h) return;
+    sCamera.aspect = w / h;
+    sCamera.updateProjectionMatrix();
+    sRenderer.setSize(w, h);
+  });
+
+  animateSimplex();
+}
+
+function barycentricPosition(healthy, imbalance, obstruction) {
+  return new THREE.Vector3()
+    .addScaledVector(sCorners.healthy, healthy)
+    .addScaledVector(sCorners.imbalance, imbalance)
+    .addScaledVector(sCorners.obstruction, obstruction);
+}
+
+function updateSimplex(buffer) {
+  if (!sScene || buffer.length === 0) return;
+
+  const trailPoints = buffer.slice(-12);
+  while (sTrailGroup.children.length) {
+    const m = sTrailGroup.children.pop();
+    m.geometry.dispose();
+    m.material.dispose();
+  }
+  trailPoints.forEach((r, i) => {
+    const pos = barycentricPosition(r.healthy, r.imbalance, r.obstruction);
+    const t = (i + 1) / trailPoints.length;
+    const mesh = new THREE.Mesh(
+      new THREE.SphereGeometry(0.022 + 0.024 * t, 8, 8),
+      new THREE.MeshBasicMaterial({ color: 0x22d3ee, transparent: true, opacity: 0.12 + 0.6 * t })
+    );
+    mesh.position.copy(pos);
+    sTrailGroup.add(mesh);
+  });
+
+  const latest = buffer[buffer.length - 1];
+  sPoint.position.copy(barycentricPosition(latest.healthy, latest.imbalance, latest.obstruction));
+  sPoint.material.color.set(faultClass(latest.cls) === 'healthy' ? 0xffffff : 0xfbbf24);
+}
+
+function animateSimplex() {
+  requestAnimationFrame(animateSimplex);
+  if (!sScene) return;
+  if (!dragActive) userYaw += 0.0022; // slow idle spin
+  sRoot.rotation.y = userYaw;
+  sRoot.rotation.x = userPitch;
+  sRings.forEach((r, i) => { r.rotation.z += 0.003 * (i + 1); });
+  sRenderer.render(sScene, sCamera);
+}
+
+/* ---------- Gemini explain ---------- */
+async function requestExplanation() {
+  const btn = document.getElementById('explain-btn');
+  const status = document.getElementById('explain-status');
+  const resultEl = document.getElementById('explain-result');
+  const contextEl = document.getElementById('explain-context');
+
+  if (!lastKnownReading) {
+    status.textContent = 'no live reading yet, wait for the link to populate first';
+    return;
+  }
+
+  btn.disabled = true;
+  resultEl.textContent = '';
+  const snapshot = lastKnownReading;
+  contextEl.textContent = `Waiting on: fault_class=${snapshot.cls}, ` +
+    `confidence=${(snapshot.confidence * 100).toFixed(0)}%, temp=${snapshot.temp_c.toFixed(1)}\u00b0C ` +
+    `(requested ${new Date().toLocaleTimeString()})`;
+  status.textContent = 'requesting analysis...';
+  try {
+    const baseRes = await fetch(ENDPOINT + '?action=get_explanation');
+    const baseData = await baseRes.json();
+    explainBaseline = baseData.explanation || '';
+
+    await fetch(ENDPOINT, {
+      method: 'POST',
+      body: JSON.stringify({ action: 'request_explanation' })
+    });
+
+    status.textContent = 'waiting for device response (up to ~15s)...';
+    if (explainPolling) clearInterval(explainPolling);
+    explainPolling = setInterval(checkExplanation, EXPLAIN_POLL_MS);
+  } catch (err) {
+    status.textContent = 'request failed: ' + err.message;
+    btn.disabled = false;
+  }
+}
+
+async function checkExplanation() {
+  const status = document.getElementById('explain-status');
+  const resultEl = document.getElementById('explain-result');
+  const btn = document.getElementById('explain-btn');
+  try {
+    const res = await fetch(ENDPOINT + '?action=get_explanation');
+    const data = await res.json();
+    const current = data.explanation || '';
+    if (current && current !== explainBaseline) {
+      clearInterval(explainPolling);
+      explainPolling = null;
+      resultEl.textContent = current;
+      status.textContent = 'analysis received ' + new Date().toLocaleTimeString() + ' (for the reading above)';
+      btn.disabled = false;
+    }
+  } catch (err) {
+    // transient poll failures: next successful poll catches up
+  }
+}
+
+/* ---------- fault history ---------- */
 async function load() {
   const status = document.getElementById('status');
-  status.textContent = 'fetching…';
+  status.textContent = 'fetching...';
   try {
     const res = await fetch(ENDPOINT);
     const rows = await res.json();
-
     if (!rows || rows.length < 2) {
       document.getElementById('table').style.display = 'none';
       document.getElementById('empty').style.display = 'block';
       status.textContent = 'connected, no data rows yet';
+      window.historyRows = [];
       return;
     }
-
     const [header, ...data] = rows;
+    window.historyRows = data;
     document.getElementById('empty').style.display = 'none';
-
     document.getElementById('head').innerHTML =
       header.map(h => `<th>${h}</th>`).join('');
-
     document.getElementById('body').innerHTML = data.slice().reverse().map(row => {
       const cells = row.map((cell, i) => {
         const cls = i === 1 ? `fault-${faultClass(cell)}` : '';
@@ -91,15 +950,17 @@ async function load() {
       }).join('');
       return `<tr>${cells}</tr>`;
     }).join('');
-
     document.getElementById('table').style.display = 'table';
-    status.textContent = `connected — ${data.length} reading${data.length === 1 ? '' : 's'}, last updated ${new Date().toLocaleTimeString()}`;
+    status.textContent = `${data.length} events - updated ${new Date().toLocaleTimeString()}`;
   } catch (err) {
     status.textContent = 'fetch failed: ' + err.message;
   }
 }
 
+initSimplex();
 load();
+pollLive();
+setInterval(pollLive, LIVE_POLL_MS);
 </script>
 </body>
 </html>
