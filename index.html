@@ -7,6 +7,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;900&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <style>
   :root {
     --void: #04070d;
@@ -211,15 +212,19 @@
     padding: 12px 14px;
     overflow: hidden;
   }
-  .chart-wrap { flex: 1; min-height: 0; position: relative; }
-  #fault-chart { width: 100%; height: 100%; display: block; }
-  #fault-chart .grid-line { stroke: rgba(255,255,255,0.07); stroke-width: 1; }
-  #fault-chart .axis-label { fill: var(--muted); font-size: 9px; font-family: "Share Tech Mono", monospace; }
-  #fault-chart .now-line { stroke: rgba(255,255,255,0.5); stroke-width: 1; stroke-dasharray: 3 3; }
-  #fault-chart .band-healthy { fill: #22d3ee; fill-opacity: 0.55; }
-  #fault-chart .band-imbalance { fill: #fbbf24; fill-opacity: 0.6; }
-  #fault-chart .band-obstruction { fill: #fb7185; fill-opacity: 0.65; }
-  #fault-chart .band-edge { fill: none; stroke-width: 1.4; }
+  .chart-wrap { flex: 1; min-height: 0; position: relative; cursor: grab; }
+  .chart-wrap:active { cursor: grabbing; }
+  #fault-chart-3d { width: 100%; height: 100%; display: block; }
+  .axis-overlay {
+    position: absolute; z-index: 3; pointer-events: none;
+    font-size: 0.6rem; letter-spacing: 0.08em; color: var(--muted);
+    font-family: "Share Tech Mono", monospace; text-transform: uppercase;
+  }
+  .axis-overlay.pct-100 { top: 6px; left: 8px; }
+  .axis-overlay.pct-0 { bottom: 22px; left: 8px; }
+  .axis-overlay.t-old { bottom: 6px; left: 8px; }
+  .axis-overlay.t-now { bottom: 6px; right: 8px; }
+  .axis-overlay.orbit-hint { top: 6px; right: 8px; }
 
   .chart-legend {
     display: flex; gap: 18px; margin-top: 8px;
@@ -475,7 +480,12 @@
   <div class="panel center boot d3">
     <h2>Fault Composition &mdash; Last 100 Readings</h2>
     <div class="chart-wrap">
-      <svg id="fault-chart" viewBox="0 0 600 260" preserveAspectRatio="none"></svg>
+      <div id="fault-chart-3d"></div>
+      <div class="axis-overlay pct-100">100%</div>
+      <div class="axis-overlay pct-0">0%</div>
+      <div class="axis-overlay t-old">oldest</div>
+      <div class="axis-overlay t-now">now &#9654;</div>
+      <div class="axis-overlay orbit-hint">drag to orbit</div>
     </div>
     <div class="chart-legend">
       <span><span class="swatch sw-healthy"></span>healthy</span>
@@ -815,57 +825,135 @@ function renderAnalytics(buffer) {
 }
 
 /* ---------- fault composition chart (hero) ---------- */
-let faultChartInitialized = false;
+let fcScene, fcCamera, fcRenderer, fcRoot, fcBars;
+let fcDragActive = false, fcDragLastX = 0, fcDragLastY = 0, fcYaw = -0.5, fcPitch = 0.28;
+
+const BAR_SPACING = 0.9;
+const BAR_SIZE = 0.62;
+const MAX_HEIGHT = 3.2;
+
+function initFaultChart3D() {
+  const container = document.getElementById('fault-chart-3d');
+  const width = container.clientWidth || 600;
+  const height = container.clientHeight || 300;
+
+  fcScene = new THREE.Scene();
+  fcCamera = new THREE.PerspectiveCamera(42, width / height, 0.1, 200);
+
+  fcRenderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+  fcRenderer.setSize(width, height);
+  container.appendChild(fcRenderer.domElement);
+
+  fcScene.add(new THREE.AmbientLight(0xffffff, 0.55));
+  const dirLight = new THREE.DirectionalLight(0xffffff, 0.7);
+  dirLight.position.set(4, 8, 6);
+  fcScene.add(dirLight);
+
+  fcRoot = new THREE.Group();
+  fcScene.add(fcRoot);
+
+  const grid = new THREE.GridHelper(120, 60, 0x1c3a4d, 0x14232f);
+  grid.position.y = 0;
+  fcRoot.add(grid);
+
+  fcBars = new THREE.Group();
+  fcRoot.add(fcBars);
+
+  container.addEventListener('pointerdown', e => {
+    fcDragActive = true; fcDragLastX = e.clientX; fcDragLastY = e.clientY;
+  });
+  window.addEventListener('pointermove', e => {
+    if (!fcDragActive) return;
+    fcYaw += (e.clientX - fcDragLastX) * 0.006;
+    fcPitch += (e.clientY - fcDragLastY) * 0.004;
+    fcPitch = Math.max(0.05, Math.min(1.1, fcPitch));
+    fcDragLastX = e.clientX; fcDragLastY = e.clientY;
+  });
+  window.addEventListener('pointerup', () => { fcDragActive = false; });
+
+  window.addEventListener('resize', () => {
+    const w = container.clientWidth, h = container.clientHeight;
+    if (!w || !h) return;
+    fcCamera.aspect = w / h;
+    fcCamera.updateProjectionMatrix();
+    fcRenderer.setSize(w, h);
+  });
+
+  animateFaultChart3D();
+}
 
 function renderFaultChart(buffer) {
-  const svg = document.getElementById('fault-chart');
-  const W = 600, H = 260, padTop = 10, padBottom = 24, padLeft = 4, padRight = 4;
-  const chartH = H - padTop - padBottom;
-  const yFor = frac => padTop + (1 - frac) * chartH;
+  if (!fcScene) return;
 
-  if (buffer.length < 2) {
-    svg.innerHTML = '<text class="axis-label" x="10" y="130">gathering readings...</text>';
-    return;
+  while (fcBars.children.length) {
+    const m = fcBars.children.pop();
+    m.geometry.dispose();
+    m.material.dispose();
   }
 
   const n = buffer.length;
-  const xFor = i => padLeft + (i / (n - 1)) * (W - padLeft - padRight);
+  if (n === 0) return;
 
-  const healthyTop = buffer.map(r => r.healthy);
-  const imbalanceTop = buffer.map((r, i) => healthyTop[i] + r.imbalance);
-  const obstructionTop = buffer.map((r, i) => imbalanceTop[i] + r.obstruction);
+  const zLen = (n - 1) * BAR_SPACING;
 
-  const band = (bottoms, tops, cls) => {
-    const top = buffer.map((r, i) => `${xFor(i).toFixed(1)},${yFor(tops[i]).toFixed(1)}`);
-    const bottom = buffer.map((r, i) => `${xFor(i).toFixed(1)},${yFor(bottoms[i]).toFixed(1)}`).reverse();
-    return `<polygon class="band-${cls}" points="${top.join(' ')} ${bottom.join(' ')}" />` +
-      `<polyline class="band-edge" style="stroke:${
-        cls === 'healthy' ? '#22d3ee' : cls === 'imbalance' ? '#fbbf24' : '#fb7185'
-      }" points="${top.join(' ')}" />`;
-  };
+  buffer.forEach((r, i) => {
+    const z = -i * BAR_SPACING; // oldest far away, newest closest to camera
+    const isNow = i === n - 1;
+    const segments = [
+      { frac: r.healthy, color: 0x22d3ee },
+      { frac: r.imbalance, color: 0xfbbf24 },
+      { frac: r.obstruction, color: 0xfb7185 }
+    ];
+    let yBase = 0;
+    segments.forEach(seg => {
+      const segH = Math.max(0.002, seg.frac * MAX_HEIGHT);
+      const geo = new THREE.BoxGeometry(BAR_SIZE, segH, BAR_SIZE);
+      const mat = new THREE.MeshStandardMaterial({
+        color: seg.color,
+        emissive: seg.color,
+        emissiveIntensity: isNow ? 0.55 : 0.18,
+        transparent: true,
+        opacity: isNow ? 0.95 : 0.72,
+        roughness: 0.5,
+        metalness: 0.1
+      });
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.position.set(0, yBase + segH / 2, z);
+      fcBars.add(mesh);
+      yBase += segH;
+    });
 
-  const zero = buffer.map(() => 0);
-  const bandsSvg =
-    band(zero, healthyTop, 'healthy') +
-    band(healthyTop, imbalanceTop, 'imbalance') +
-    band(imbalanceTop, obstructionTop, 'obstruction');
+    if (isNow) {
+      const outline = new THREE.LineSegments(
+        new THREE.EdgesGeometry(new THREE.BoxGeometry(BAR_SIZE * 1.15, MAX_HEIGHT, BAR_SIZE * 1.15)),
+        new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.5 })
+      );
+      outline.position.set(0, MAX_HEIGHT / 2, z);
+      fcBars.add(outline);
+    }
+  });
 
-  const gridSvg = [0, 0.25, 0.5, 0.75, 1].map(f => {
-    const y = yFor(f).toFixed(1);
-    return `<line class="grid-line" x1="${padLeft}" y1="${y}" x2="${W - padRight}" y2="${y}" />` +
-      `<text class="axis-label" x="${padLeft + 3}" y="${(yFor(f) - 3).toFixed(1)}">${(f * 100).toFixed(0)}%</text>`;
-  }).join('');
+  // Frame the whole row: look roughly at its midpoint, offset back and up.
+  const midZ = -zLen / 2;
+  fcRoot.position.set(0, 0, -midZ);
+  const dist = Math.max(6, zLen * 0.75);
+  fcCamera.position.set(
+    Math.sin(fcYaw) * dist * Math.cos(fcPitch),
+    dist * Math.sin(fcPitch) + 1.2,
+    Math.cos(fcYaw) * dist * Math.cos(fcPitch)
+  );
+  fcCamera.lookAt(0, MAX_HEIGHT * 0.35, 0);
+}
 
-  const nowX = xFor(n - 1).toFixed(1);
-  const nowSvg = `<line class="now-line" x1="${nowX}" y1="${padTop}" x2="${nowX}" y2="${H - padBottom + 4}" />`;
-
-  const first = buffer[0].ts;
-  const last = buffer[n - 1].ts;
-  const timeLabels =
-    `<text class="axis-label" x="${padLeft}" y="${H - 6}">${first.toLocaleTimeString()}</text>` +
-    `<text class="axis-label" x="${W - 70}" y="${H - 6}">${last.toLocaleTimeString()}</text>`;
-
-  svg.innerHTML = gridSvg + bandsSvg + nowSvg + timeLabels;
+function animateFaultChart3D() {
+  requestAnimationFrame(animateFaultChart3D);
+  if (!fcRenderer) return;
+  if (!fcDragActive) fcYaw += 0.0012; // slow idle orbit
+  const dist = fcCamera.position.length ? Math.hypot(fcCamera.position.x, fcCamera.position.z) : 8;
+  fcCamera.position.x = Math.sin(fcYaw) * dist;
+  fcCamera.position.z = Math.cos(fcYaw) * dist;
+  fcCamera.lookAt(0, MAX_HEIGHT * 0.35, 0);
+  fcRenderer.render(fcScene, fcCamera);
 }
 
 function renderStateReadout(buffer) {
@@ -995,6 +1083,7 @@ async function load() {
   }
 }
 
+initFaultChart3D();
 load();
 pollLive();
 setInterval(pollLive, LIVE_POLL_MS);
