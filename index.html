@@ -274,6 +274,16 @@
     stroke: var(--accent);
     filter: drop-shadow(0 0 4px var(--accent-soft));
   }
+  #confidence-sparkline circle {
+    fill: var(--accent);
+    filter: drop-shadow(0 0 4px var(--accent-soft));
+  }
+  #confidence-sparkline .spark-fill { fill: var(--accent-faint); }
+  #confidence-sparkline .spark-label {
+    fill: var(--muted);
+    font-size: 8px;
+    font-family: "Share Tech Mono", monospace;
+  }
   #sensor-status { font-size: 0.62rem; color: var(--critical); letter-spacing: 0.08em; min-height: 14px; margin-top: 4px; }
 
   /* ---------- bottom strip ---------- */
@@ -486,7 +496,7 @@
     </div>
     <div class="panel boot d4" id="spark-panel">
       <h2>Confidence Trend</h2>
-      <svg id="confidence-sparkline" width="100%" height="46" viewBox="0 0 300 46" preserveAspectRatio="none"></svg>
+      <svg id="confidence-sparkline" width="100%" height="84" viewBox="0 0 300 84" preserveAspectRatio="none"></svg>
     </div>
   </div>
 
@@ -552,7 +562,7 @@ setInterval(() => {
 async function pollLive() {
   const liveStatus = document.getElementById('live-status');
   try {
-    const res = await fetch(ENDPOINT + '?action=get_live');
+    const res = await fetch(ENDPOINT + '?action=get_live', { cache: 'no-store' });
     const rows = await res.json();
     if (!rows || rows.length < 2) {
       liveStatus.textContent = 'connected, no live data yet';
@@ -722,13 +732,30 @@ function formatDuration(ms) {
 function renderSparkline(values) {
   const svg = document.getElementById('confidence-sparkline');
   if (values.length < 2) { svg.innerHTML = ''; return; }
-  const w = 300, h = 46, pad = 4;
-  const points = values.map((v, i) => {
-    const x = (i / (values.length - 1)) * w;
-    const y = h - pad - v * (h - pad * 2);
-    return `${x.toFixed(1)},${y.toFixed(1)}`;
-  }).join(' ');
-  svg.innerHTML = `<polyline points="${points}" fill="none" stroke-width="2" />`;
+  const w = 300, h = 84, pad = 12;
+  const yFor = v => h - pad - v * (h - pad * 2);
+
+  const points = values.map((v, i) => [(i / (values.length - 1)) * w, yFor(v)]);
+  const lineStr = points.map(p => `${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' ');
+  const areaStr = `0,${(h - pad).toFixed(1)} ${lineStr} ${w},${(h - pad).toFixed(1)}`;
+  const lastY = points[points.length - 1][1];
+
+  const grid = [0, 0.5, 1].map(f => {
+    const y = yFor(f).toFixed(1);
+    return `<line x1="0" y1="${y}" x2="${w}" y2="${y}" stroke="rgba(255,255,255,0.06)" stroke-width="1" />`;
+  }).join('');
+
+  const labels =
+    `<text class="spark-label" x="2" y="${(yFor(1) + 8).toFixed(1)}">100%</text>` +
+    `<text class="spark-label" x="2" y="${(yFor(0.5) + 3).toFixed(1)}">50%</text>` +
+    `<text class="spark-label" x="2" y="${(yFor(0) - 2).toFixed(1)}">0%</text>`;
+
+  svg.innerHTML =
+    grid +
+    `<polygon class="spark-fill" points="${areaStr}" stroke="none" />` +
+    `<polyline points="${lineStr}" fill="none" stroke-width="2" />` +
+    `<circle cx="${w}" cy="${lastY.toFixed(1)}" r="3.5" />` +
+    labels;
 }
 
 function renderAnalytics(buffer) {
@@ -919,6 +946,7 @@ async function requestExplanation() {
   try {
     await fetch(ENDPOINT, {
       method: 'POST',
+      cache: 'no-store',
       body: JSON.stringify({ action: 'request_explanation' })
     });
 
@@ -951,12 +979,12 @@ async function checkExplanation() {
     // genuinely unchanged state can legitimately return identical
     // wording from Gemini, which made a text-diff check get stuck
     // waiting forever for a "change" that was never coming.
-    const res = await fetch(ENDPOINT + '?action=check_trigger');
+    const res = await fetch(ENDPOINT + '?action=check_trigger', { cache: 'no-store' });
     const data = await res.json();
     if (data.trigger === false) {
       clearInterval(explainPolling);
       explainPolling = null;
-      const expRes = await fetch(ENDPOINT + '?action=get_explanation');
+      const expRes = await fetch(ENDPOINT + '?action=get_explanation', { cache: 'no-store' });
       const expData = await expRes.json();
       resultEl.textContent = expData.explanation || '(device returned no explanation)';
       status.textContent = 'analysis received ' + new Date().toLocaleTimeString() + ' (for the reading above)';
@@ -973,7 +1001,7 @@ async function load() {
   const status = document.getElementById('status');
   status.textContent = 'fetching...';
   try {
-    const res = await fetch(ENDPOINT);
+    const res = await fetch(ENDPOINT, { cache: 'no-store' });
     const rows = await res.json();
     if (!rows || rows.length < 2) {
       document.getElementById('table').style.display = 'none';
