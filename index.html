@@ -353,6 +353,32 @@
     opacity: 0.75;
     text-shadow: 0 0 10px var(--accent-soft);
   }
+  .footer-right { display: flex; align-items: center; gap: 16px; }
+  .portfolio-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--void);
+    background: var(--accent);
+    font-family: "Orbitron", sans-serif;
+    font-weight: 700;
+    font-size: 0.58rem;
+    letter-spacing: 0.18em;
+    text-decoration: none;
+    padding: 5px 12px;
+    border-radius: 3px;
+    animation: portfolioPulse 2.2s ease-in-out infinite;
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
+  }
+  .portfolio-link::after { content: "\2192"; }
+  .portfolio-link:hover {
+    transform: translateY(-1px) scale(1.05);
+    box-shadow: 0 0 18px var(--accent-soft), 0 0 34px var(--accent-faint);
+  }
+  @keyframes portfolioPulse {
+    0%, 100% { box-shadow: 0 0 8px var(--accent-soft), 0 0 16px var(--accent-faint); }
+    50%      { box-shadow: 0 0 16px var(--accent-soft), 0 0 30px var(--accent-faint); }
+  }
 
   /* ---------- boot sequence ---------- */
   .boot { animation: bootIn 0.55s ease both; }
@@ -368,7 +394,7 @@
     100% { opacity: 1; transform: translateY(0); }
   }
   @media (prefers-reduced-motion: reduce) {
-    .boot, .live-dot { animation: none !important; }
+    .boot, .live-dot, .portfolio-link { animation: none !important; }
     body::after { display: none; }
   }
 
@@ -493,7 +519,10 @@
 
   <footer class="boot d5">
     <span>SPINDOCTOR // EDGE-TO-CLOUD PREDICTIVE MAINTENANCE // STM32 + ESP32 + NANOEDGE AI</span>
-    <span class="watermark">DESIGNED BY SHRUTIK</span>
+    <span class="footer-right">
+      <a class="portfolio-link" href="https://shrutik-kapatel.github.io/" target="_blank" rel="noopener">VIEW PORTFOLIO</a>
+      <span class="watermark">DESIGNED BY SHRUTIK</span>
+    </span>
   </footer>
 
 </div>
@@ -507,7 +536,8 @@ const SENSOR_GLITCH_THRESHOLD_C = 3;
 let lastLiveTimestampMs = null;
 let lastKnownReading = null;
 let explainPolling = null;
-let explainBaseline = null;
+let explainElapsedMs = 0;
+const EXPLAIN_TIMEOUT_MS = 60000;
 
 function faultClass(value) {
   return (value || '').toString().toLowerCase().trim().replace(/\s+/g, '-');
@@ -880,22 +910,19 @@ async function requestExplanation() {
 
   btn.disabled = true;
   resultEl.textContent = '';
+  explainElapsedMs = 0;
   const snapshot = lastKnownReading;
   contextEl.textContent = `Waiting on: fault_class=${snapshot.cls}, ` +
     `confidence=${(snapshot.confidence * 100).toFixed(0)}%, temp=${snapshot.temp_c.toFixed(1)}\u00b0C ` +
     `(requested ${new Date().toLocaleTimeString()})`;
   status.textContent = 'requesting analysis...';
   try {
-    const baseRes = await fetch(ENDPOINT + '?action=get_explanation');
-    const baseData = await baseRes.json();
-    explainBaseline = baseData.explanation || '';
-
     await fetch(ENDPOINT, {
       method: 'POST',
       body: JSON.stringify({ action: 'request_explanation' })
     });
 
-    status.textContent = 'waiting for device response (up to ~15s)...';
+    status.textContent = 'waiting for device response (device auto-retries on transient failures)...';
     if (explainPolling) clearInterval(explainPolling);
     explainPolling = setInterval(checkExplanation, EXPLAIN_POLL_MS);
   } catch (err) {
@@ -908,19 +935,36 @@ async function checkExplanation() {
   const status = document.getElementById('explain-status');
   const resultEl = document.getElementById('explain-result');
   const btn = document.getElementById('explain-btn');
+
+  explainElapsedMs += EXPLAIN_POLL_MS;
+  if (explainElapsedMs >= EXPLAIN_TIMEOUT_MS) {
+    clearInterval(explainPolling);
+    explainPolling = null;
+    status.textContent = 'no response after 60s, device may be offline. Try again.';
+    btn.disabled = false;
+    return;
+  }
+
   try {
-    const res = await fetch(ENDPOINT + '?action=get_explanation');
+    // Completion is signaled by the device clearing its own trigger
+    // flag, not by comparing explanation text: two requests for a
+    // genuinely unchanged state can legitimately return identical
+    // wording from Gemini, which made a text-diff check get stuck
+    // waiting forever for a "change" that was never coming.
+    const res = await fetch(ENDPOINT + '?action=check_trigger');
     const data = await res.json();
-    const current = data.explanation || '';
-    if (current && current !== explainBaseline) {
+    if (data.trigger === false) {
       clearInterval(explainPolling);
       explainPolling = null;
-      resultEl.textContent = current;
+      const expRes = await fetch(ENDPOINT + '?action=get_explanation');
+      const expData = await expRes.json();
+      resultEl.textContent = expData.explanation || '(device returned no explanation)';
       status.textContent = 'analysis received ' + new Date().toLocaleTimeString() + ' (for the reading above)';
       btn.disabled = false;
     }
   } catch (err) {
-    // transient poll failures: next successful poll catches up
+    // Transient poll failures aren't worth surfacing every 3s, the
+    // next successful poll (or the timeout above) will resolve it.
   }
 }
 
