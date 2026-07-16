@@ -284,11 +284,12 @@ static bool call_gemini(const char *api_key, const spindoctor_reading_t *reading
  * s_apps_script_mutex, so no separate locking is needed here. */
 static char s_apps_script_response_data[1024];
 static http_response_buf_t s_apps_script_resp = { .buffer = s_apps_script_response_data, .len = 0 };
-static esp_http_client_handle_t s_apps_script_client = NULL;
+static esp_http_client_handle_t s_apps_script_post_client = NULL;
+static esp_http_client_handle_t s_apps_script_get_client = NULL;
 
-static esp_http_client_handle_t get_apps_script_client(void)
+static esp_http_client_handle_t get_apps_script_post_client(void)
 {
-    if (s_apps_script_client == NULL) {
+    if (s_apps_script_post_client == NULL) {
         esp_http_client_config_t config = {
             .url = APPS_SCRIPT_URL,
             .event_handler = gemini_http_event_handler,
@@ -297,29 +298,30 @@ static esp_http_client_handle_t get_apps_script_client(void)
             .timeout_ms = 15000,
             .disable_auto_redirect = true,
         };
-        s_apps_script_client = esp_http_client_init(&config);
-        esp_http_client_set_header(s_apps_script_client, "Content-Type", "application/json");
+        s_apps_script_post_client = esp_http_client_init(&config);
+        esp_http_client_set_header(s_apps_script_post_client, "Content-Type", "application/json");
     }
-    return s_apps_script_client;
+    return s_apps_script_post_client;
 }
 
-/* If the far end silently closes an idle keep-alive connection between
- * our spaced-out calls, esp_http_client_perform fails outright rather
- * than reconnecting on its own. Tear down so the next
- * get_apps_script_client() call rebuilds from scratch. */
-static void reset_apps_script_client(void)
+static void reset_apps_script_post_client(void)
 {
-    if (s_apps_script_client != NULL) {
-        esp_http_client_cleanup(s_apps_script_client);
-        s_apps_script_client = NULL;
+    if (s_apps_script_post_client != NULL) {
+        esp_http_client_cleanup(s_apps_script_post_client);
+        s_apps_script_post_client = NULL;
     }
 }
 
+/* Apps Script executes the POST side effect (writing to the sheet)
+ * before issuing its redirect, so a 302 here already means success.
+ * We never use the response body for log_reading/submit_explanation,
+ * so we don't follow the redirect at all, avoiding an unnecessary
+ * second network round-trip that could itself flake. */
 static bool apps_script_post(const char *json_body)
 {
     xSemaphoreTake(s_apps_script_mutex, portMAX_DELAY);
 
-    esp_http_client_handle_t client = get_apps_script_client();
+    esp_http_client_handle_t client = get_apps_script_post_client();
     s_apps_script_resp.len = 0;
     memset(s_apps_script_response_data, 0, sizeof(s_apps_script_response_data));
 
@@ -331,8 +333,8 @@ static bool apps_script_post(const char *json_body)
     int status_code = esp_http_client_get_status_code(client);
 
     if (err != ESP_OK) {
-        reset_apps_script_client();
-        client = get_apps_script_client();
+        reset_apps_script_post_client();
+        client = get_apps_script_post_client();
         s_apps_script_resp.len = 0;
         memset(s_apps_script_response_data, 0, sizeof(s_apps_script_response_data));
         esp_http_client_set_url(client, APPS_SCRIPT_URL);
@@ -352,7 +354,47 @@ static bool apps_script_post(const char *json_body)
     return true;
 }
 
-/* Serialized behind s_apps_script_mutex: see comment at declaration. */
+static esp_http_client_handle_t get_apps_script_get_client(void)
+{
+    if (s_apps_script_get_client == NULL) {
+        esp_http_client_config_t config = {
+            .url = APPS_SCRIPT_URL,
+            .event_handler = gemini_http_event_handler,
+            .user_data = &s_apps_script_resp,
+            .crt_bundle_attach = esp_crt_bundle_attach,
+            .timeout_ms = 15000,
+            .buffer_size = 8192,
+            .disable_auto_redirect = true,
+            /* Redirect is followed manually below, with the response
+             * buffer explicitly cleared between the two hops. Auto
+             * redirect was tried and reverted: esp_http_client still
+             * fires the body event handler for the intermediate 302
+             * page before internally following the redirect, and we
+             * have no hook to clear the shared buffer in between, so
+             * the 302 page's HTML and the final JSON ended up
+             * concatenated in the same buffer on every single call.
+             * That made check_trigger's response always fail to parse
+             * as JSON even though the HTTP call itself "succeeded". */
+        };
+        s_apps_script_get_client = esp_http_client_init(&config);
+    }
+    return s_apps_script_get_client;
+}
+
+static void reset_apps_script_get_client(void)
+{
+    if (s_apps_script_get_client != NULL) {
+        esp_http_client_cleanup(s_apps_script_get_client);
+        s_apps_script_get_client = NULL;
+    }
+}
+
+/* GET calls (check_trigger, get_explanation, get_live, default log
+ * fetch) use a separate client from POST. Redirect is followed
+ * manually: Apps Script's web app always 302s a GET to a
+ * script.googleusercontent.com echo endpoint that actually holds the
+ * response body, so we need the body, unlike POST's log/submit
+ * actions where a bare 302 already means success. */
 static bool apps_script_get(const char *query_suffix, char *out_response, size_t out_size)
 {
     xSemaphoreTake(s_apps_script_mutex, portMAX_DELAY);
@@ -360,25 +402,23 @@ static bool apps_script_get(const char *query_suffix, char *out_response, size_t
     char url[512];
     snprintf(url, sizeof(url), "%s%s", APPS_SCRIPT_URL, query_suffix);
 
-    esp_http_client_handle_t client = get_apps_script_client();
+    esp_http_client_handle_t client = get_apps_script_get_client();
     s_apps_script_resp.len = 0;
     memset(s_apps_script_response_data, 0, sizeof(s_apps_script_response_data));
 
     esp_http_client_set_url(client, url);
     esp_http_client_set_method(client, HTTP_METHOD_GET);
-    esp_http_client_set_post_field(client, NULL, 0);
 
     esp_err_t err = esp_http_client_perform(client);
     int status_code = esp_http_client_get_status_code(client);
 
     if (err != ESP_OK) {
-        reset_apps_script_client();
-        client = get_apps_script_client();
+        reset_apps_script_get_client();
+        client = get_apps_script_get_client();
         s_apps_script_resp.len = 0;
         memset(s_apps_script_response_data, 0, sizeof(s_apps_script_response_data));
         esp_http_client_set_url(client, url);
         esp_http_client_set_method(client, HTTP_METHOD_GET);
-        esp_http_client_set_post_field(client, NULL, 0);
         err = esp_http_client_perform(client);
         status_code = esp_http_client_get_status_code(client);
     }
