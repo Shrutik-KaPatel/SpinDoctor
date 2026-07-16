@@ -236,6 +236,9 @@
   .chart-legend .sw-healthy { background: #22d3ee; }
   .chart-legend .sw-imbalance { background: #fbbf24; }
   .chart-legend .sw-obstruction { background: #fb7185; }
+  .replay-btn { margin-left: auto; padding: 3px 10px; font-size: 0.55rem; }
+  body.offline .live-dot { background: #5a6b7a; box-shadow: none; animation: none; }
+  body.offline .brand span { color: #5a6b7a; }
 
   .state-readout {
     margin-top: 6px;
@@ -489,6 +492,7 @@
       <span><span class="swatch sw-healthy"></span>healthy</span>
       <span><span class="swatch sw-imbalance"></span>imbalance</span>
       <span><span class="swatch sw-obstruction"></span>obstruction</span>
+      <button id="replay-btn" class="replay-btn" onclick="startReplay()">&#9654; replay last 100</button>
     </div>
     <div class="state-readout" id="state-readout"></div>
   </div>
@@ -617,8 +621,22 @@ async function pollLive() {
     const latest = buffer[buffer.length - 1];
     const clsSlug = faultClass(latest.cls);
 
+    // Staleness: the Live sheet keeps its last rows forever, so old
+    // data still comes back after the ESP32 dies. Freshness has to be
+    // judged from the newest row's own timestamp, not from whether the
+    // fetch succeeded.
+    const dataAgeMs = Date.now() - latest.ts.getTime();
+    const isStale = dataAgeMs > OFFLINE_AFTER_MS;
+    if (isStale && fcOnline) {
+      fcOnline = false; // fan winds down in the animation loop
+    } else if (!isStale && !fcOnline) {
+      fcOnline = true;
+      fcBootT = Date.now(); // cinematic spin-up on revival
+    }
+    document.body.classList.toggle('offline', !fcOnline);
+
     // HUD alert mode: whole color scheme shifts amber on a live fault
-    document.body.classList.toggle('alert', clsSlug !== 'healthy');
+    document.body.classList.toggle('alert', fcOnline && clsSlug !== 'healthy');
 
     const classEl = document.getElementById('live-class');
     classEl.textContent = latest.cls.toUpperCase();
@@ -634,7 +652,9 @@ async function pollLive() {
     document.getElementById('sysline').innerHTML =
       'TELEMETRY LINK <span class="ok">ACTIVE</span> // STM32 CORE // NANOEDGE SVM // ' +
       buffer.length + ' READINGS BUFFERED';
-    liveStatus.textContent = 'link active - last update ' + new Date().toLocaleTimeString();
+    liveStatus.textContent = fcOnline
+      ? 'link active - last update ' + new Date().toLocaleTimeString()
+      : 'OFFLINE - no new data for ' + Math.round(dataAgeMs / 1000) + 's (last reading ' + latest.ts.toLocaleTimeString() + ')';
 
     if (latest.ts.getTime() !== lastLiveTimestampMs) {
       lastLiveTimestampMs = latest.ts.getTime();
@@ -642,6 +662,7 @@ async function pollLive() {
     }
 
     lastKnownReading = latest;
+    window.liveBuffer = buffer;
     renderAnalytics(buffer);
   } catch (err) {
     liveStatus.textContent = 'live fetch failed: ' + err.message;
@@ -828,7 +849,12 @@ let fcBladeMats = [], fcHubMat = null, fcBeamMat = null, fcBaseRingMat = null, f
 let fcGuardRings = [];
 let fcCurrentClass = 'healthy';
 let fcDragActive = false, fcDragLastX = 0, fcDragLastY = 0, fcYaw = 0.35, fcPitch = 0.16;
-let fcSpinAngle = 0, fcLastFrameT = 0;
+let fcSpinAngle = 0, fcSpinVel = 0, fcLastFrameT = 0;
+let fcOnline = true, fcBootT = 0, fcReplay = null;
+
+const OFFLINE_AFTER_MS = 90000;
+const BOOT_DURATION_MS = 2500;
+const REPLAY_STEP_MS = 120;
 
 const HALO_RADIUS = 3.2;
 const CAM_DIST = 8.8;
@@ -1010,52 +1036,147 @@ function renderFaultChart(buffer) {
   /* ----- state tint: everything glowing follows the live class ----- */
   const latest = buffer[n - 1];
   fcCurrentClass = faultClass(latest.cls);
-  const nowColor = CLASS_COLORS[fcCurrentClass] || 0x22d3ee;
-  fcBladeMats.forEach(m => { m.color.setHex(nowColor); m.emissive.setHex(nowColor); });
-  fcHubMat.color.setHex(nowColor);
-  fcHubMat.emissive.setHex(nowColor);
-  fcCoreHaloMat.color.setHex(nowColor);
-  fcBeamMat.color.setHex(nowColor);
-  fcBaseRingMat.color.setHex(nowColor);
-  fcGlowLight.color.setHex(nowColor);
+}
+
+const GRAY = 0x5a6b7a;
+
+function applyVisualTint(hex) {
+  fcBladeMats.forEach(m => { m.color.setHex(hex); m.emissive.setHex(hex); });
+  fcHubMat.color.setHex(hex);
+  fcHubMat.emissive.setHex(hex);
+  fcCoreHaloMat.color.setHex(hex);
+  fcBeamMat.color.setHex(hex);
+  fcBaseRingMat.color.setHex(hex);
+  fcGlowLight.color.setHex(hex);
+}
+
+/* ----- cinematic replay of the buffer ----- */
+function startReplay() {
+  const buf = window.liveBuffer;
+  if (!buf || buf.length === 0 || fcReplay) return;
+  fcReplay = { idx: 0, lastStep: 0 };
+  fcBootT = Date.now(); // reuse the boot camera-sweep for a dramatic start
+  const btn = document.getElementById('replay-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'replaying...'; }
+}
+
+function endReplay() {
+  fcReplay = null;
+  const btn = document.getElementById('replay-btn');
+  if (btn) { btn.disabled = false; btn.innerHTML = '&#9654; replay last 100'; }
+  const buf = window.liveBuffer;
+  if (buf && buf.length) renderStateReadout(buf);
+}
+
+function renderStateReadout(buffer) {
+  const el = document.getElementById('state-readout');
+  if (!el || fcReplay) return; // replay loop owns this text while active
+  const latest = buffer[buffer.length - 1];
+  const spanMs = latest.ts.getTime() - buffer[0].ts.getTime();
+  const spanLabel = buffer.length < 3 ? 'gathering data' : formatDuration(spanMs) + ' span';
+
+  let trend = 'holding steady';
+  if (buffer.length >= 9) {
+    const third = Math.max(1, Math.floor(buffer.length / 3));
+    const avg = arr => arr.reduce((a, b) => a + b, 0) / arr.length;
+    const early = avg(buffer.slice(0, third).map(r => r.healthy));
+    const recent = avg(buffer.slice(-third).map(r => r.healthy));
+    const delta = recent - early;
+    if (delta > 0.05) trend = 'moving toward healthy';
+    else if (delta < -0.05) trend = 'drifting toward a fault';
+  }
+
+  const prefix = fcOnline ? '' :
+    'FAN OFFLINE - showing last known data (' + latest.ts.toLocaleTimeString() + ') \u00b7 ';
+  el.textContent = prefix + buffer.length + ' readings \u00b7 ' + spanLabel + ' \u00b7 ' + trend +
+    ' \u00b7 last: ' + (latest.confidence * 100).toFixed(0) + '% ' + latest.cls;
 }
 
 function animateFaultChart3D() {
   requestAnimationFrame(animateFaultChart3D);
   if (!fcRenderer) return;
 
-  const t = Date.now() * 0.001;
+  const nowMs = Date.now();
+  const t = nowMs * 0.001;
   const dt = fcLastFrameT ? Math.min(0.05, t - fcLastFrameT) : 0.016;
   fcLastFrameT = t;
+
+  /* ----- advance replay, if one is running ----- */
+  let effClass = fcCurrentClass;
+  let effOnline = fcOnline;
+  if (fcReplay) {
+    const buf = window.liveBuffer || [];
+    if (buf.length === 0) { endReplay(); }
+    else {
+      if (nowMs - fcReplay.lastStep > REPLAY_STEP_MS) {
+        fcReplay.lastStep = nowMs;
+        fcReplay.idx++;
+        if (fcReplay.idx >= buf.length) { endReplay(); }
+      }
+      if (fcReplay) {
+        const r = buf[Math.min(fcReplay.idx, buf.length - 1)];
+        effClass = faultClass(r.cls);
+        effOnline = true; // replay animates even while the real fan is offline
+        const el = document.getElementById('state-readout');
+        if (el) el.textContent = 'REPLAY ' + (fcReplay.idx + 1) + '/' + buf.length +
+          ' \u00b7 ' + r.ts.toLocaleTimeString() + ' \u00b7 ' + r.cls +
+          ' (' + (r.confidence * 100).toFixed(0) + '%) \u00b7 ' + r.temp_c.toFixed(1) + '\u00b0C';
+      }
+    }
+  }
+
+  /* ----- boot / revival camera sweep and glow flash ----- */
+  let boot = 1;
+  if (fcBootT) {
+    boot = Math.min(1, (nowMs - fcBootT) / BOOT_DURATION_MS);
+    if (boot >= 1) fcBootT = 0;
+  }
+  const bootEase = boot * boot * (3 - 2 * boot); // smoothstep
 
   // Motion mirrors state:
   //  healthy     -> fast, smooth spin
   //  imbalance   -> spinning but visibly wobbling on its axis
   //  obstruction -> struggling: slow, stuttering rotation
-  let spinSpeed = 10.0;
+  //  offline     -> target speed 0: the fan winds down like it lost power
+  let targetSpeed = 10.0;
   let wobble = 0;
-  if (fcCurrentClass === 'imbalance') {
-    spinSpeed = 7.5;
+  if (effClass === 'imbalance') {
+    targetSpeed = 7.5;
     wobble = Math.sin(t * 11) * 0.08;
-  } else if (fcCurrentClass === 'obstruction') {
-    spinSpeed = Math.max(0.25, 1.4 + Math.sin(t * 9) * 1.25); // stutter
+  } else if (effClass === 'obstruction') {
+    targetSpeed = Math.max(0.25, 1.4 + Math.sin(t * 9) * 1.25); // stutter
   }
-  fcSpinAngle += spinSpeed * dt;
+  if (!effOnline) { targetSpeed = 0; wobble = 0; }
+  targetSpeed *= bootEase;
+
+  // Ease actual speed toward the target: gives a natural wind-up on
+  // boot/revival and a natural wind-down when the fan goes offline.
+  fcSpinVel += (targetSpeed - fcSpinVel) * Math.min(1, dt * 1.6);
+  fcSpinAngle += fcSpinVel * dt;
   if (fcBladeGroup) fcBladeGroup.rotation.z = fcSpinAngle;
 
   if (fcFanGroup) {
-    fcFanGroup.position.y = Math.sin(t * 1.4) * 0.14; // levitation bob
+    fcFanGroup.position.y = effOnline ? Math.sin(t * 1.4) * 0.14 * bootEase : fcFanGroup.position.y * 0.98;
     fcFanGroup.rotation.x = wobble;
     fcFanGroup.rotation.z = wobble * 0.6;
   }
   fcGuardRings.forEach((r, i) => {
-    r.rotation.z += (i === 0 ? 0.004 : -0.003); // counter-rotating rings
+    r.rotation.z += (i === 0 ? 0.004 : -0.003) * (effOnline ? 1 : fcSpinVel / 10);
   });
+
+  /* ----- tint: replay class > offline gray > live class ----- */
+  const tintHex = !effOnline ? GRAY : (CLASS_COLORS[effClass] || 0x22d3ee);
+  applyVisualTint(tintHex);
   if (fcHubMat) {
-    fcHubMat.emissiveIntensity = 0.65 + 0.3 * Math.sin(t * 3); // core pulse
+    const flash = fcBootT ? (1 - bootEase) * 1.2 : 0; // core flash at boot start
+    fcHubMat.emissiveIntensity = effOnline ? 0.65 + 0.3 * Math.sin(t * 3) + flash : 0.15;
+    fcGlowLight.intensity = effOnline ? 1.3 : 0.3;
   }
 
-  if (!fcDragActive) fcYaw += 0.0008;
+  if (!fcDragActive) {
+    // extra camera sweep during boot/replay start, then settle to idle drift
+    fcYaw += 0.0008 + (fcBootT ? (1 - bootEase) * 0.02 : 0);
+  }
   fcCamera.position.set(
     Math.sin(fcYaw) * CAM_DIST * Math.cos(fcPitch),
     CAM_DIST * Math.sin(fcPitch),
