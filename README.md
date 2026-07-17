@@ -49,10 +49,10 @@ It detects three states in real time: **healthy**, **blade imbalance**, and **ob
 A microcontroller mounted directly on a fan reads vibration (3-axis accelerometer) and temperature 400 times a second, runs a machine learning model on that data **on the chip itself**, and instantly knows if the fan is:
 
 | State | Meaning |
-|:---:|---|
-| 🟢 &nbsp;**Healthy** | Running normally |
-| 🟡 &nbsp;**Imbalanced** | A blade is off-balance... |
-| 🔴 &nbsp;**Obstructed** | Something is blocking... |
+|---|---|
+| ![Healthy](https://img.shields.io/badge/HEALTHY-2EA043?style=for-the-badge) | Running normally |
+| ![Imbalanced](https://img.shields.io/badge/IMBALANCED-D4A72C?style=for-the-badge) | A blade is off-balance, an early warning sign before real damage |
+| ![Obstructed](https://img.shields.io/badge/OBSTRUCTED-CC0000?style=for-the-badge) | Something is blocking or dragging on the fan |
 
 No internet connection is needed for this detection to work, it happens entirely on the embedded chip in real time. Once a fault is detected, a second chip (ESP32) picks up the result over WiFi, asks an AI language model (Gemini) to explain what's happening in plain English, logs it, and streams it to a live web dashboard with a real-time animated "digital twin" of the fan.
 
