@@ -84,3 +84,35 @@ The dashboard does more than display a label:
 - **Replay mode** - a button that re-enacts the last 100 sensor readings end to end, useful for reviewing what happened without needing to be watching live
 
 All 9 fault/speed combinations, plus a 10th test combining two faults simultaneously, were captured and verified. **Full results in [TECHNICAL.md](TECHNICAL.md#proof-of-work).**
+## Architecture at a Glance
+
+```mermaid
+flowchart LR
+    A["STM32F407<br/>Accelerometer + Temp Sensor<br/>On-device AI Classification"] -->|UART| B["ESP32 Gateway<br/>Sends readings<br/>Polls for AI explanation"]
+    B -->|WiFi| C["Gemini API<br/>Google Sheets<br/>GitHub Pages Dashboard"]
+```
+
+Two chips split the work deliberately: the STM32 handles everything time-sensitive and safety-critical (sensing and classification) with zero dependency on connectivity, while the ESP32 only handles what actually needs the internet (AI explanation, logging, the live dashboard). If WiFi drops, fault detection keeps running uninterrupted, only the cloud-side extras pause.
+
+**Full architecture, task design, and every bug found along the way: [TECHNICAL.md](TECHNICAL.md).**
+## Quick Facts
+
+| | |
+|---|---|
+| **Sensor sampling rate** | 400 Hz (3-axis vibration) |
+| **On-device model size** | Under 3 KB (RAM + flash combined) |
+| **Inference time** | ~0.3 ms per classification |
+| **Fault classes detected** | 3 (healthy, imbalance, obstruction) |
+| **Test scenarios validated** | 10 (3 speeds × 3 fault classes, + 1 combined-fault test) |
+| **Cloud dependency for detection** | None, fully on-device |
+| **End-to-end latency (sensor to dashboard)** | Near real-time |
+## Links
+
+- 🔴 **[Live Dashboard](https://shrutik-kapatel.github.io/SpinDoctor/)**
+- 📘 **[Full Technical Writeup](TECHNICAL.md)**
+- 💼 **[LinkedIn](your-linkedin-url-here)**
+- 📧 **[Portfolio / Contact](your-portfolio-url-here)**
+
+---
+
+<p align="center"><sub>Built solo by Shrutik Ka Patel as a capstone embedded systems + AI project.</sub></p>
