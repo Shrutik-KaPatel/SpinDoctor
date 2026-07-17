@@ -49,3 +49,38 @@ No internet connection is needed for this detection to work, it happens entirely
 ```
 Fan vibrates → Chip senses & classifies → Result explained by AI → Shown live on dashboard
 ```
+## Why This Project
+
+This was built as a solo capstone project to prove hands-on depth across the full embedded-to-cloud AI stack, not to follow a tutorial. Every layer here was built and debugged from scratch: bare-metal peripheral drivers, a real-time operating system, an on-device machine learning pipeline, a wireless gateway, and a cloud integration, wired together into one working system.
+
+The project went through real engineering iteration along the way: a signal-processing approach that was built, validated, and deliberately retired once proven unnecessary; a model that misclassified under one operating condition, diagnosed, and fixed with a retrain; and several hard-to-reproduce bugs (a silent stack overflow, a UART/DMA conflict, a race condition corrupting network data) found through actual debugging tools, not guesswork.
+
+The full engineering log, every decision, bug, and fix, is documented in **[TECHNICAL.md](TECHNICAL.md)**.
+## Skills Demonstrated
+
+| Area | What was built |
+|---|---|
+| **Embedded C / Bare-Metal** | Custom SPI+DMA driver for a 3-axis accelerometer at 400Hz, bit-banged microsecond-precision protocol for a temperature sensor, interrupt-driven UART with DMA-safe transmission |
+| **Real-Time OS Design (FreeRTOS)** | 5-task priority architecture, mutex-protected shared state, semaphore-based inter-task signaling, watchdog-based fault recovery |
+| **On-Device Machine Learning (TinyML)** | Full pipeline from raw sensor capture to trained classifier to on-chip inference, model runs in under 3KB of RAM/flash with sub-millisecond inference time |
+| **Systematic Debugging** | Found and fixed a silent, hard-to-reproduce reset bug (a stack overflow with no visible crash) using a hardware debugger and live call-stack inspection, not trial and error |
+| **Embedded Networking / IoT** | WiFi gateway on a second microcontroller, structured data handoff between two chips, REST API integration with a cloud LLM |
+| **Cloud & Backend Integration** | Google Sheets used as a lightweight backend via Apps Script, event-driven logging design to stay within API quotas |
+| **Full-Stack / UX Thinking** | Live web dashboard with real-time data, an animated system status ("digital twin"), and offline/reconnect handling that reflects actual sensor state |
+
+**Read the story behind each of these in [TECHNICAL.md](TECHNICAL.md).**
+## See It In Action
+
+<p align="center">
+  <img src="Docs/Images/2O.png" alt="SpinDoctor detecting an obstruction fault in real time" width="700"/>
+  <br/><sub>Live classification: obstruction detected, confidence and temperature shown in real time</sub>
+</p>
+
+The dashboard does more than display a label:
+
+- **Digital twin animation** - a 3D fan visualization that spins, wobbles, or stutters live based on the actual classified state, not a static icon
+- **Offline detection** - if the fan goes silent for 90 seconds, the twin visibly winds down and the dashboard flags it as offline, rather than silently showing stale data as if it were live
+- **Cinematic reconnect** - when data resumes, the twin spins back up on screen in real time
+- **Replay mode** - a button that re-enacts the last 100 sensor readings end to end, useful for reviewing what happened without needing to be watching live
+
+All 9 fault/speed combinations, plus a 10th test combining two faults simultaneously, were captured and verified. **Full results in [TECHNICAL.md](TECHNICAL.md#proof-of-work).**
