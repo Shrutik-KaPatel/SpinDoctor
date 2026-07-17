@@ -36,3 +36,16 @@ It detects three states in real time: **healthy**, **blade imbalance**, and **ob
 </table>
 
 ---
+## What It Does
+
+A microcontroller mounted directly on a fan reads vibration (3-axis accelerometer) and temperature 400 times a second, runs a machine learning model on that data **on the chip itself**, and instantly knows if the fan is:
+
+- 🟢 **Healthy** - running normally
+- 🟡 **Imbalanced** - a blade is off-balance, an early warning sign before real damage
+- 🔴 **Obstructed** - something is blocking or dragging on the fan
+
+No internet connection is needed for this detection to work, it happens entirely on the embedded chip in real time. Once a fault is detected, a second chip (ESP32) picks up the result over WiFi, asks an AI language model (Gemini) to explain what's happening in plain English, logs it, and streams it to a live web dashboard with a real-time animated "digital twin" of the fan.
+
+```
+Fan vibrates → Chip senses & classifies → Result explained by AI → Shown live on dashboard
+```
