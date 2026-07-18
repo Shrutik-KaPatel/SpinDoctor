@@ -23,11 +23,23 @@
     --muted: #5f7f96;
     --grid-line: rgba(34, 211, 238, 0.045);
   }
-  body.alert {
+  body.state-imbalance {
     --accent: #fbbf24;
     --accent-soft: rgba(251, 191, 36, 0.4);
     --accent-faint: rgba(251, 191, 36, 0.12);
     --grid-line: rgba(251, 191, 36, 0.05);
+  }
+  body.state-obstruction {
+    --accent: #fb7185;
+    --accent-soft: rgba(251, 113, 133, 0.4);
+    --accent-faint: rgba(251, 113, 133, 0.12);
+    --grid-line: rgba(251, 113, 133, 0.05);
+  }
+  body.offline {
+    --accent: #7a8ba0;
+    --accent-soft: rgba(122, 139, 160, 0.35);
+    --accent-faint: rgba(122, 139, 160, 0.12);
+    --grid-line: rgba(122, 139, 160, 0.04);
   }
 
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -236,9 +248,57 @@
   .chart-legend .sw-healthy { background: #22d3ee; }
   .chart-legend .sw-imbalance { background: #fbbf24; }
   .chart-legend .sw-obstruction { background: #fb7185; }
-  .replay-btn { margin-left: auto; padding: 3px 10px; font-size: 0.55rem; }
+  .replay-btn {
+    margin-left: auto;
+    background: var(--accent);
+    color: var(--void);
+    border: none;
+    padding: 7px 16px;
+    font-size: 0.62rem;
+    font-weight: 700;
+    letter-spacing: 0.18em;
+    border-radius: 3px;
+    animation: portfolioPulse 2.2s ease-in-out infinite;
+    text-shadow: none;
+  }
+  .replay-btn:hover { background: var(--accent); color: var(--void); transform: translateY(-1px); }
+  .replay-btn:disabled { animation: none; opacity: 0.55; transform: none; }
   body.offline .live-dot { background: #5a6b7a; box-shadow: none; animation: none; }
   body.offline .brand span { color: #5a6b7a; }
+
+  .twin-status {
+    position: absolute;
+    top: 10px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 4;
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    font-family: "Orbitron", sans-serif;
+    font-size: 0.95rem;
+    font-weight: 700;
+    letter-spacing: 0.3em;
+    padding: 8px 22px 8px 18px;
+    border: 1px solid var(--accent-soft);
+    background: rgba(4, 7, 13, 0.65);
+    color: var(--accent);
+    text-shadow: 0 0 12px var(--accent-soft);
+    box-shadow: 0 0 18px var(--accent-faint), inset 0 0 14px rgba(0,0,0,0.4);
+  }
+  .twin-status .ts-icon { font-size: 0.8rem; }
+  .twin-status.live .ts-icon { animation: pulse 1.6s ease-in-out infinite; }
+  .twin-status.offline {
+    color: #8fa1b5;
+    border-color: rgba(122,139,160,0.5);
+    text-shadow: none;
+    box-shadow: none;
+  }
+  .twin-status.replay {
+    color: #ffffff;
+    border-color: rgba(255,255,255,0.5);
+    text-shadow: 0 0 12px rgba(255,255,255,0.5);
+  }
 
   .state-readout {
     margin-top: 6px;
@@ -483,6 +543,7 @@
     <h2>Digital Twin &mdash; Live Fan Mirror</h2>
     <div class="chart-wrap">
       <div id="fault-chart-3d"></div>
+      <div class="twin-status live" id="twin-status"><span class="ts-icon" id="twin-status-icon">&#9679;</span><span id="twin-status-text">LIVE</span></div>
       <div class="axis-overlay pct-100">blade color + motion = current state</div>
       <div class="axis-overlay pct-0">smooth spin = healthy &middot; wobble = imbalance &middot; stutter = obstruction</div>
       <div class="axis-overlay t-now">outer halo = last 100 readings &middot; &#9660; newest</div>
@@ -635,8 +696,13 @@ async function pollLive() {
     }
     document.body.classList.toggle('offline', !fcOnline);
 
-    // HUD alert mode: whole color scheme shifts amber on a live fault
-    document.body.classList.toggle('alert', fcOnline && clsSlug !== 'healthy');
+    // Per-state HUD theming: the whole color scheme follows the live
+    // class (amber = imbalance, red = obstruction), and goes muted
+    // gray when offline. Offline strips the fault classes so gray
+    // always wins.
+    document.body.classList.toggle('state-imbalance', fcOnline && clsSlug === 'imbalance');
+    document.body.classList.toggle('state-obstruction', fcOnline && clsSlug === 'obstruction');
+    if (!fcReplay) setTwinStatus(fcOnline ? 'live' : 'offline', fcOnline ? 'LIVE' : 'OFFLINE');
 
     const classEl = document.getElementById('live-class');
     classEl.textContent = latest.cls.toUpperCase();
@@ -1050,18 +1116,29 @@ function applyVisualTint(hex) {
   fcGlowLight.color.setHex(hex);
 }
 
+function setTwinStatus(state, text) {
+  const badge = document.getElementById('twin-status');
+  if (!badge) return;
+  badge.className = 'twin-status ' + state;
+  document.getElementById('twin-status-icon').innerHTML =
+    state === 'offline' ? '&#9211;' : state === 'replay' ? '&#9654;' : '&#9679;';
+  document.getElementById('twin-status-text').textContent = text;
+}
+
 /* ----- cinematic replay of the buffer ----- */
 function startReplay() {
   const buf = window.liveBuffer;
   if (!buf || buf.length === 0 || fcReplay) return;
   fcReplay = { idx: 0, lastStep: 0 };
   fcBootT = Date.now(); // reuse the boot camera-sweep for a dramatic start
+  setTwinStatus('replay', 'REPLAY');
   const btn = document.getElementById('replay-btn');
   if (btn) { btn.disabled = true; btn.textContent = 'replaying...'; }
 }
 
 function endReplay() {
   fcReplay = null;
+  setTwinStatus(fcOnline ? 'live' : 'offline', fcOnline ? 'LIVE' : 'OFFLINE');
   const btn = document.getElementById('replay-btn');
   if (btn) { btn.disabled = false; btn.innerHTML = '&#9654; replay last 100'; }
   const buf = window.liveBuffer;
