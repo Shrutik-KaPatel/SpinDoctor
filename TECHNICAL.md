@@ -95,3 +95,37 @@ This split exists because these two jobs have fundamentally different reliabilit
 ### Why UART between the two chips
 
 A direct wired UART link (rather than, say, both chips on the same WiFi network talking over sockets) was chosen so the STM32's output is a single, simple, always-available interface regardless of the ESP32's network state. The STM32 doesn't need to know if the ESP32 is connected, booted, or even present, it just writes to UART. This decision is what makes the "STM32 doesn't know the network exists" property in the table above actually true, not just aspirational.
+## Hardware
+
+### Components
+
+| Component | Role |
+|---|---|
+| **STM32F407G-DISC1** (STM32F407VGT6, Cortex-M4) | Edge compute: sensing, FreeRTOS, on-device AI inference |
+| **LIS3DSH** (onboard the Discovery board) | 3-axis MEMS accelerometer, vibration sensing |
+| **DHT11** | Digital temperature/humidity sensor |
+| **ESP32-WROOM-32D** (30-pin, CP2102 breakout) | WiFi gateway, cloud integration |
+| **Onboard ST-LINK** | Primary programmer/debugger for all SpinDoctor firmware work, including the stack overflow investigation ([Section 7](#hardening-arc)) |
+| **SEGGER J-Link Pro** | Thread-aware debugging used during pre-capstone bring-up and mini-projects ([Section 4](#groundwork-before-the-capstone)), where FreeRTOS thread-aware debugging skills were built before the capstone began |
+| **Comidox CP317 Logic Analyzer** | Protocol-level verification during bring-up |
+
+### Physical setup
+
+The STM32F407G-DISC1 board is mounted directly on the fan housing, with the LIS3DSH accelerometer (built into the Discovery board) rigidly coupled to the fan body so it picks up the fan's actual mechanical vibration rather than an isolated, dampened signal. The DHT11 is mounted nearby to sense ambient/motor-adjacent temperature.
+
+<p align="center">
+  <img src="Docs/Images/Hardware.png" alt="SpinDoctor hardware mounted on test fan" width="500"/>
+</p>
+
+Fault states were physically induced on the same fan rather than simulated in software:
+- **Blade imbalance**: a small weight added asymmetrically to one blade, shifting the rotational mass distribution
+- **Obstruction**: a physical object introduced to partially block or drag on the blade path during rotation
+
+Both fault types were tested across all 3 fan speed settings, since vibration signature strength scales with RPM, this is what surfaced the low-speed classification issue discussed in [Section 9](#model-training-nanoedge-ai-studio).
+
+### Wiring
+
+- **LIS3DSH**: onboard, connected internally via SPI1 (no external wiring required)
+- **DHT11**: single-wire bit-banged data line on **PB6**, timing handled via the ARM DWT cycle counter for microsecond-accurate pulse measurement
+- **STM32 → ESP32 link**: USART3, **PB10 (TX)** → ESP32 **GPIO16 (RX)**, and **PB11 (RX)** ← ESP32 **GPIO17 (TX)**
+  - USART3 was chosen specifically over USART1 to avoid a pin conflict with the Discovery board's onboard audio codec, which shares pins with USART1 in this board's default configuration
