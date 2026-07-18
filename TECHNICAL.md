@@ -143,3 +143,50 @@ A series of STM32 practice projects were completed first, covering peripheral-le
 Before SpinDoctor integration began, a structured sequence of mini-projects was completed to validate each subsystem in isolation before combining them, sensor bring-up, peripheral drivers, and FreeRTOS subsystem validation, each proven working independently before being integrated into the more complex multi-task system.
 
 This sequencing matters for one reason: every peripheral driver used in SpinDoctor (SPI+DMA, bit-banged timing, interrupt-driven UART) was already validated independently, in isolation, before being integrated into the more complex multi-task FreeRTOS system. When something broke during capstone integration, it was reasonable to assume the bug was in the integration, not in a peripheral driver seeing real hardware for the first time.
+## Firmware Architecture (STM32 Side)
+
+### Why FreeRTOS
+
+Five things need to happen concurrently on one chip: sample vibration at 400Hz without ever missing a sample, read temperature on a slow independent cycle, feed a live capture menu over UART, run on-device inference on completed windows, and guarantee the system recovers if anything hangs. A bare superloop makes it very easy for a slow operation (a print, a sensor read with a timeout) to delay something time-critical. FreeRTOS lets each concern run as its own task with its own priority, so the scheduler, not hand-written timing logic, guarantees the accelerometer path is never starved.
+
+### One-time boot sequence
+
+Before the FreeRTOS scheduler starts, `main()` runs sequentially:
+
+1. **HAL_Init()** and **SystemClock_Config()** - core init, PLL configured to 168MHz
+2. **Peripheral init** - GPIO, DMA, SPI1, USART2/3, ADC1, IWDG
+3. **LIS3DSH init** - ODR set to 400Hz, axis enable, DRDY interrupt routing configured so the sensor itself pulses an interrupt pin on every new sample
+4. **DWT cycle counter enabled** - required for microsecond-accurate delays used by the DHT11 bit-banged protocol; forgetting this silently hangs that task forever with no error, since there's no fault, just a task that never returns from a wait loop
+5. **NanoEdge AI classifier init** - loads the trained model, must succeed before any inference call is valid
+6. **FreeRTOS objects created** - all mutexes, semaphores, and tasks are created here, but nothing runs yet
+7. **Semaphore draining** - a CMSIS-RTOS V1 quirk creates `captureDataReadyHandle` with an initial token already set; this is drained immediately so tasks correctly block on their *first* wait instead of running once against garbage data
+8. **osKernelStart()** - hands control to FreeRTOS; `main()` never returns from here
+
+### Task architecture
+
+| Task | Priority | Responsibility |
+|---|---|---|
+| **AccelTask** | Highest | Processes LIS3DSH samples as they arrive, fills ping-pong capture buffers, signals when a full window is ready |
+| **DHT11Task** | Lowest | Bit-banged temperature read every 3s; purely informational, allowed to fail or be delayed without consequence |
+| **WatchdogTask** | Below Normal | Refreshes the IWDG watchdog every 500ms; if any task hangs long enough to starve the scheduler, this stops running and the chip resets |
+| **CaptureTask** | Below Normal | Runs the interactive UART menu used to select fan speed/fault class and record training data |
+| **InferenceTask** | Below Normal | Runs the on-device classifier on each completed sample window and reports the result |
+
+Priority is assigned strictly by how time-sensitive the data is, not by how "important" a task feels. Missing an accelerometer sample corrupts a window and potentially the classification, so it runs at the highest priority with nothing allowed to delay it. Temperature is slow-moving, informational context, so it runs at the lowest priority and is allowed to be skipped or delayed without any real consequence.
+
+**How a sample actually moves through the system:** the LIS3DSH pulses its DRDY pin on an external interrupt line every ~2.5ms (400Hz). That interrupt starts a 6-byte SPI burst read over DMA, not blocking any task. When the DMA transfer completes, its callback reconstructs the X/Y/Z values and sets a data-ready flag. AccelTask itself runs a tight, low-latency loop checking that flag, so the expensive part (the actual SPI transaction) happens in hardware/interrupt context, and the task only does lightweight bookkeeping: writing the sample into the current ping-pong buffer, and once every 64 samples, releasing `captureDataReadyHandle` to signal a complete window downstream.
+
+### Mutexes
+
+- **`diagnosticsMutexHandle`** - protects a shared diagnostics struct written by both AccelTask and DHT11Task, held only for the duration of the struct write itself, never across a slow call like a print
+- **`printfMutexHandle`** - protects the underlying print call and the C library's internal formatting state, which is not safe to call from two tasks at once; without this, two tasks printing near-simultaneously produced visibly corrupted, interleaved output during development (e.g. two lines fusing into garbled text mid-word)
+
+### Semaphores
+
+- **`uartTxSemaphoreHandle`** - serializes UART DMA transmissions so only one transfer is ever in flight; released by the transfer-complete interrupt callback. This semaphore is strictly paired with DMA-mode transmission only, a blocking-mode transmit call must never touch it, since blocking mode never fires that callback, which would permanently consume a token that's never returned and deadlock every future print
+- **`captureDataReadyHandle`** - signals that a full sample window is ready in the ping-pong buffer; both CaptureTask and InferenceTask wait on it, with a runtime flag determining which one actually consumes the window at any given moment (training capture owns the data if a capture session is active, otherwise inference does)
+- **`captureRxByteReadyHandle`** - signals that a byte has arrived over UART, used by CaptureTask to block on user input during the training-data capture menu without busy-waiting
+
+### A design principle worth naming
+
+Task stack sizes and FreeRTOS configuration are treated as living tuning parameters, not fixed at design time. Every task's stack size in this project was revised at least once after real evidence (a stack overflow, see [Section 7](#hardening-arc)) rather than guessed upfront and left alone. CubeMX's `.ioc` file is kept as the single source of truth for these values, rather than hand-editing generated config headers directly.
