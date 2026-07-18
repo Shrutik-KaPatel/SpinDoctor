@@ -162,30 +162,56 @@ Before the FreeRTOS scheduler starts, `main()` runs sequentially:
 7. **Semaphore draining** - a CMSIS-RTOS V1 quirk creates `captureDataReadyHandle` with an initial token already set; this is drained immediately so tasks correctly block on their *first* wait instead of running once against garbage data
 8. **osKernelStart()** - hands control to FreeRTOS; `main()` never returns from here
 
+## Firmware Architecture (STM32 Side)
+
+### Why FreeRTOS
+
+Five things need to happen concurrently on one chip: sample vibration at 400Hz without ever missing a sample, read temperature on a slow independent cycle, feed a live capture menu over UART, run on-device inference on completed windows, and guarantee the system recovers if anything hangs. A bare superloop makes it very easy for a slow operation (a print, a sensor read with a timeout) to delay something time-critical. FreeRTOS lets each concern run as its own task with its own priority, so the scheduler, not hand-written timing logic, guarantees the accelerometer path is never starved.
+
+### One-time boot sequence
+
+Before the FreeRTOS scheduler starts, `main()` runs sequentially:
+
+1. **HAL_Init()** and **SystemClock_Config()** - core init, PLL configured to 168MHz
+2. **Peripheral init** - GPIO, DMA, SPI1, USART2/USART3, ADC1, IWDG
+3. **LIS3DSH init** - ODR set to 400Hz, axis enable, then a second explicit register write routes DRDY to INT1/PE0; without this second step the chip never pulses PE0 and the EXTI interrupt never fires at all
+4. **DWT cycle counter enabled** - required for microsecond-accurate delays used by the DHT11 bit-banged protocol; forgetting this silently hangs that task forever with no crash, just a task that never returns from a wait loop
+5. **ADC1 started in circular DMA mode** - from this point, temperature-sensor raw readings update automatically in hardware with no further software trigger
+6. **Interrupt-driven UART receive armed** - `HAL_UART_Receive_IT` is started for the capture menu before the scheduler even starts, since blocking-mode receive doesn't coexist safely with DMA-based transmit already active on the same UART
+7. **NanoEdge AI classifier init** - loads the trained model; if this fails, the system halts in `Error_Handler()` rather than running with an uninitialized classifier
+8. **FreeRTOS objects created** - all mutexes, semaphores, and tasks are created here, but nothing runs yet
+9. **Both capture semaphores drained** - a CMSIS-RTOS V1 quirk creates semaphores with an initial token already set; `captureDataReadyHandle` and `captureRxByteReadyHandle` are both drained immediately so their respective tasks correctly block on their *first* wait instead of running once against garbage data
+10. **Thread creation checked** - each `osThreadCreate()` return value is checked for `NULL`; a failure reports directly over blocking UART, bypassing the mutex/DMA-based print path entirely, since if RTOS object creation itself is failing, the mutex and DMA infrastructure it depends on can't be trusted either
+11. **osKernelStart()** - hands control to FreeRTOS; `main()` never returns from here
+
 ### Task architecture
 
-| Task | Priority | Responsibility |
-|---|---|---|
-| **AccelTask** | Highest | Processes LIS3DSH samples as they arrive, fills ping-pong capture buffers, signals when a full window is ready |
-| **DHT11Task** | Lowest | Bit-banged temperature read every 3s; purely informational, allowed to fail or be delayed without consequence |
-| **WatchdogTask** | Below Normal | Refreshes the IWDG watchdog every 500ms; if any task hangs long enough to starve the scheduler, this stops running and the chip resets |
-| **CaptureTask** | Below Normal | Runs the interactive UART menu used to select fan speed/fault class and record training data |
-| **InferenceTask** | Below Normal | Runs the on-device classifier on each completed sample window and reports the result |
+| Task | Priority | Stack (words) | Responsibility |
+|---|---|---|---|
+| **AccelTask** | Normal (highest) | 512 | Polls a data-ready flag set by the SPI/DMA interrupt chain, fills ping-pong capture buffers, signals when a full window is ready |
+| **CaptureTask** | Below Normal | 512 | Runs the interactive UART menu used to select fan speed/fault class and record training data |
+| **InferenceTask** | Below Normal | 1024 | Runs the on-device classifier on each completed sample window and reports the result |
+| **DHT11Task** | Low | 256 | Bit-banged temperature read every 3s; purely informational |
+| **WatchdogTask** | Low | 512 | Refreshes the IWDG watchdog every 500ms |
 
-Priority is assigned strictly by how time-sensitive the data is, not by how "important" a task feels. Missing an accelerometer sample corrupts a window and potentially the classification, so it runs at the highest priority with nothing allowed to delay it. Temperature is slow-moving, informational context, so it runs at the lowest priority and is allowed to be skipped or delayed without any real consequence.
+Most of this ordering follows a clear rule: priority is assigned by how time-sensitive the data is. Missing an accelerometer sample corrupts a window and potentially the classification, so AccelTask runs highest. Temperature is slow-moving, informational context, so DHT11Task runs lowest.
 
-**How a sample actually moves through the system:** the LIS3DSH pulses its DRDY pin on an external interrupt line every ~2.5ms (400Hz). That interrupt starts a 6-byte SPI burst read over DMA, not blocking any task. When the DMA transfer completes, its callback reconstructs the X/Y/Z values and sets a data-ready flag. AccelTask itself runs a tight, low-latency loop checking that flag, so the expensive part (the actual SPI transaction) happens in hardware/interrupt context, and the task only does lightweight bookkeeping: writing the sample into the current ping-pong buffer, and once every 64 samples, releasing `captureDataReadyHandle` to signal a complete window downstream.
+**One inconsistency worth naming honestly:** the watchdog pattern from earlier practice work was explicitly designed with the watchdog task running at a *higher* priority than the tasks it's meant to catch, the reasoning being that a runaway task at equal or higher priority could starve the watchdog out entirely, defeating its purpose. In SpinDoctor, `WatchdogTask` ended up at `osPriorityLow`, tied with `DHT11Task`, contradicting that earlier principle. This wasn't a deliberate re-decision, it's a byproduct of assigning the other four tasks their priorities first and the watchdog landing wherever was left. It currently works because no task in this system has actually starved the scheduler long enough to expose the gap, but it's a known latent risk, and the honest fix would be raising `WatchdogTask` above every worker task it's meant to protect against.
+
+### How a sample actually moves through the system
+
+The LIS3DSH pulses its DRDY pin on an external interrupt line every ~2.5ms (400Hz). That interrupt starts a burst SPI read over DMA: a 1-byte address transmit, whose completion callback starts a 6-byte data receive, whose completion callback reconstructs X/Y/Z and sets a `LIS3_DataReady` flag. None of this blocks any task. AccelTask itself runs a loop polling that flag with `osDelay(1)` between checks, so the expensive part (the actual SPI transaction) happens entirely in interrupt/DMA context, and the task only does lightweight bookkeeping: writing the sample into the current ping-pong buffer (`capture_buf_x/y/z[2][64]`), and once every 64 samples, releasing `captureDataReadyHandle` to signal a complete window downstream. This buffer fill and semaphore release happen unconditionally on every sample, whether or not a training capture is active, since both CaptureTask (during capture) and InferenceTask (during normal operation) need a continuous, uninterrupted stream of windows. A separate `capture_active` flag only gates whether AccelTask also prints a throttled diagnostic line, it does not gate whether data flows into the shared buffer.
 
 ### Mutexes
 
-- **`diagnosticsMutexHandle`** - protects a shared diagnostics struct written by both AccelTask and DHT11Task, held only for the duration of the struct write itself, never across a slow call like a print
-- **`printfMutexHandle`** - protects the underlying print call and the C library's internal formatting state, which is not safe to call from two tasks at once; without this, two tasks printing near-simultaneously produced visibly corrupted, interleaved output during development (e.g. two lines fusing into garbled text mid-word)
+- **`diagnosticsMutexHandle`** - protects a shared diagnostics struct. AccelTask and DHT11Task write to it (accelerometer values, temperature/humidity); InferenceTask reads the temperature back out of it when building the JSON payload sent to the ESP32. Held only for the duration of the actual struct access, never across a slow call like a print.
+- **`printfMutexHandle`** - protects the underlying print call and the C library's internal formatting state, which is not safe to call from two tasks at once; without this, two tasks printing near-simultaneously produced visibly corrupted, interleaved output during development. Deliberately **not** used inside `vApplicationStackOverflowHook`, that handler uses direct blocking `HAL_UART_Transmit` instead, because the offending task's stack may already be corrupted, and taking a mutex plus routing through printf's formatting would push more onto that same compromised stack before the message can get out.
 
 ### Semaphores
 
-- **`uartTxSemaphoreHandle`** - serializes UART DMA transmissions so only one transfer is ever in flight; released by the transfer-complete interrupt callback. This semaphore is strictly paired with DMA-mode transmission only, a blocking-mode transmit call must never touch it, since blocking mode never fires that callback, which would permanently consume a token that's never returned and deadlock every future print
-- **`captureDataReadyHandle`** - signals that a full sample window is ready in the ping-pong buffer; both CaptureTask and InferenceTask wait on it, with a runtime flag determining which one actually consumes the window at any given moment (training capture owns the data if a capture session is active, otherwise inference does)
-- **`captureRxByteReadyHandle`** - signals that a byte has arrived over UART, used by CaptureTask to block on user input during the training-data capture menu without busy-waiting
+- **`uartTxSemaphoreHandle`** - serializes UART DMA transmissions so only one transfer is ever in flight; released by the transfer-complete interrupt callback. `_write()` (the function `printf` ultimately calls) waits on it, starts the DMA transfer, then waits on it again with a **bounded 200ms timeout**, not `osWaitForever`, so a stuck transfer surfaces as a single dropped line instead of freezing every future `printf` call in the system. This semaphore is strictly paired with DMA-mode transmission only; a blocking-mode transmit call must never touch it, since blocking mode never fires the completion callback that releases it, which would permanently consume a token that's never returned.
+- **`captureDataReadyHandle`** - signals that a full sample window is ready in the ping-pong buffer; both CaptureTask and InferenceTask wait on it, with the `capture_active` flag determining which one is the intended consumer at any given moment (InferenceTask skips and loops again if a capture session owns the data).
+- **`captureRxByteReadyHandle`** - signals that a byte has arrived over UART, used by CaptureTask to block on user input during the training-data capture menu without busy-waiting.
 
 ### A design principle worth naming
 
