@@ -674,3 +674,44 @@ Three documents serve three different, deliberately non-overlapping purposes:
 ### Branching and commit discipline
 
 All code changes go through feature branches merged via pull request, even working solo, since the PR description becomes a permanent, browsable record of *why* a change was made, not just *what* changed. `PROGRESS.md` is the one exception, committed directly to `main`, since routing a logbook entry through review adds friction without adding value. Every `PROGRESS.md` entry that references a commit uses a real hash pulled via `git log -1 --format=%h` at the time of writing, never a placeholder.
+
+## How to Build / Run It
+
+This section is written for a reviewer who wants to reproduce or inspect the system, not just read about it. It assumes basic familiarity with STM32CubeIDE, ESP-IDF, and Git.
+
+### STM32 side
+
+1. Clone the repository and open `firmware/stm32/SpinDoctor_STM32` in STM32CubeIDE.
+2. Import as an existing project (CubeIDE will pick up the `.ioc` file and generated sources automatically).
+3. Connect the STM32F407G-DISC1 via its onboard ST-LINK (USB Mini-B, `CN1`), with the `CN3` jumpers in the default ON position ([Section 3](#hardware)) so the onboard ST-LINK targets the on-board STM32F407VGT6.
+4. Build and flash directly from CubeIDE (Run > Debug, or the flash/download toolbar button).
+5. Open a serial terminal (minicom, PuTTY, or similar) on the ST-LINK's virtual COM port at **460800 baud, 8N1**, no flow control, to see live `InferenceTask` output and access the capture menu ([Section 8](#data-capture-pipeline)).
+
+**Not independently verified in this section:** the exact CubeIDE version dependency and whether a from-scratch import reproduces the `.ioc`-generated stack sizes exactly as tuned in [Section 5](#firmware-architecture-stm32-side) without any manual regeneration step. If you hit a mismatch here, the `.ioc` file is the source of truth to check against, not the generated headers.
+
+### ESP32 side
+
+1. Install ESP-IDF (this project was built against **v5.5**). Source the environment (`get_idf` or the ESP-IDF `export.sh`, depending on your setup) before building.
+2. Open `firmware/esp32/spindoctor_gateway`.
+3. The custom `partitions.csv` ([Section 11](#esp32-gateway)) must be picked up by the build, confirm `sdkconfig` points `CONFIG_PARTITION_TABLE_CUSTOM_FILENAME` at this file rather than the ESP-IDF default.
+4. Flash the application binary normally: `idf.py -p <PORT> flash`.
+5. **Flash credentials separately**, into the dedicated `creds` NVS partition, not the app binary:
+   - Create a CSV with `wifi_ssid`, `wifi_pass`, and `gemini_api_key` keys under a `wifi_creds` namespace, matching what `app_main()` reads ([Section 11](#esp32-gateway)).
+   - Generate the NVS binary: `nvs_partition_gen.py generate <your_creds.csv> <output.bin> 0x3000` (matching the `creds` partition's 0x3000 size from `partitions.csv`).
+   - Flash it independently to the `creds` partition's offset (`0x110000`): `python -m esptool --port <PORT> write_flash 0x110000 <output.bin>`.
+   - **Never commit the credentials CSV or the generated binary**, both should stay outside version control; the repo's `.gitignore` already excludes the local `nvs_data/` working directory these are generated into.
+6. Monitor via `idf.py -p <PORT> monitor` to confirm WiFi connects and the STM32 UART link is receiving lines.
+
+**Not independently verified in this section:** the exact `sdkconfig` component list needed beyond what's already noted in [Section 11](#esp32-gateway) (`nvs_flash esp_wifi esp_event esp_netif driver json esp_http_client esp-tls`), since explicit `REQUIRES` in `main/CMakeLists.txt` disables ESP-IDF's automatic component detection, a from-scratch `idf.py build` should surface any missing component immediately as a link error if this list is incomplete.
+
+### Dashboard
+
+`index.html` is a single static file with no build step, served directly via GitHub Pages from the repository root. To point it at a different backend:
+
+1. Deploy your own copy of `backend/apps-script/Code.gs` as a Google Apps Script web app (Extensions > Apps Script from a Google Sheet, paste in the code, Deploy > New deployment > Web app, access set to "Anyone").
+2. Create the three required sheet tabs the script expects: `Sheet1` (historical log), `Live` (ring buffer), and `Control` (with `A2`/`B2` as the trigger/explanation mailbox cells, [Section 12](#cloud-integration-gemini--apps-script--sheets)).
+3. Replace the `ENDPOINT` constant near the top of `index.html`'s `<script>` block with your own deployment's URL.
+4. Update `APPS_SCRIPT_URL` in `spindoctor_gateway.c` to the same URL, so the ESP32 posts to your deployment rather than the original one.
+5. Serve `index.html` however you like, GitHub Pages, or just opening it locally, it makes no server-side calls of its own beyond `fetch()` requests to the Apps Script URL.
+
+**Not independently verified in this section:** whether any Apps Script deployment-specific quirks (execution quotas, the exact "Anyone" vs "Anyone with Google account" access setting) affect first-time setup, since this repo's own deployment was configured once and not tested as a fresh reproduction.
