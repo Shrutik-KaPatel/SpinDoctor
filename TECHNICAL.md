@@ -371,3 +371,62 @@ An early version of `InferenceTask` had a bug where the semaphore release feedin
 The LIS3DSH samples at 400Hz, one sample every 2.5ms, and a full 64-sample window completes roughly every 160ms. The first deployed SVM model's benchmark reported an inference time of ~0.3ms per classification, over two orders of magnitude faster than the time budget available between windows. This headroom is what makes it safe for `InferenceTask` to sit at a lower priority than `AccelTask`, there's no risk of inference itself becoming the bottleneck that causes a missed sample.
 
 The CNN model that replaced the SVM ([Section 9](#model-training-nanoedge-ai-studio)) was not independently benchmarked for its own inference time in the same way, this is a gap worth closing when the NanoEdge Studio screenshots are added, but given the CNN's flash footprint (~2.9KB) is still small and comparable to the SVM's, it's reasonable to expect inference time is in the same low-millisecond range rather than a meaningful fraction of the 160ms window budget. Documented here as an assumption, not a verified number.
+## ESP32 Gateway
+
+### Project scaffold and partition table
+
+The ESP32 side is a standalone ESP-IDF project (`spindoctor_gateway`). Rather than using the default partition layout, a custom `partitions.csv` reserves a dedicated `creds` NVS partition, separate from the WiFi driver's own internal `nvs` partition:
+
+| Name | Type | SubType | Offset | Size |
+|---|---|---|---|---|
+| nvs | data | nvs | 0x9000 | 0x6000 |
+| phy_init | data | phy | 0xf000 | 0x1000 |
+| factory | app | factory | 0x10000 | 1M |
+| creds | data | nvs | *(auto)* | 0x3000 |
+
+The `creds` partition's offset is left blank in the table, so `esptool` places it automatically directly after the factory app partition ends, landing at `0x110000`. Keeping WiFi credentials and the Gemini API key in their own dedicated partition, rather than mixed into the same `nvs` partition the WiFi driver manages internally, means credentials can be erased, reflashed, or backed up independently of the driver's own state, and there's no risk of an NVS operation on one accidentally colliding with the other.
+
+### Credential handling
+
+At boot, `app_main()` initializes both NVS partitions (`creds` and the default `nvs`), then opens `creds` **read-only** (`NVS_READONLY`) under the namespace `wifi_creds` and reads three values: `wifi_ssid`, `wifi_pass`, and `gemini_api_key`. Any read failure logs the specific key that failed and returns early rather than proceeding with partial credentials. None of these values are ever logged directly, only lengths (`Password length: %d chars`, `Gemini key length: %d chars`), so a log capture can't leak a credential by accident. The `creds` partition's source data never enters the public repo, it's flashed independently via `nvs_partition_gen.py` and kept out of version control entirely.
+
+### WiFi station bring-up
+
+WiFi connection uses a FreeRTOS event group (`WIFI_CONNECTED_BIT`, `WIFI_FAIL_BIT`) and a shared event handler covering both `WIFI_EVENT` and `IP_EVENT`. On `WIFI_EVENT_STA_DISCONNECTED`, the handler retries up to `MAX_RETRY` (5) times before giving up and setting `WIFI_FAIL_BIT`; a successful `IP_EVENT_STA_GOT_IP` resets the retry counter to zero and sets `WIFI_CONNECTED_BIT`. `wifi_init_sta()` blocks on `xEventGroupWaitBits()` with `portMAX_DELAY` until one of the two bits is set, so `app_main()` doesn't proceed to task creation until WiFi is either definitively up or definitively failed.
+
+### STM32 to ESP32 UART link
+
+The ESP32 receives on `UART_NUM_2`, RX on GPIO16, TX on GPIO17, at 115200 baud, matching the STM32's blocking `HAL_UART_Transmit` on USART3 described in [Section 3](#hardware). `stm32_uart_task` reads one byte at a time with a 1-second timeout, accumulating into a line buffer until it sees `\n`, then hands the complete line to `parse_stm32_line()`. This byte-by-byte approach replaced an earlier chunk-read version that fragmented JSON lines mid-message when a read didn't happen to land on a line boundary.
+
+`parse_stm32_line()` parses the line as JSON and validates every field's presence and type (`fault_class` must be a string, `confidence`/`healthy`/`imbalance`/`obstruction`/`temp_c` must all be numbers) before accepting the reading, if any field is missing or the wrong type, the whole line is rejected and logged rather than partially accepted.
+
+### Decoupling UART reading from the network
+
+A valid reading updates `s_latest_reading` under `s_reading_mutex`, a shared struct read by both `live_update_task` (periodic dashboard push) and `gateway_poll_task` (Gemini trigger handling). Separately, if the fault class has changed since the last logged value, a lightweight `log_request_t` (just `fault_class` and `temp_c`) is pushed onto `s_log_queue` with a **non-blocking** `xQueueSend(..., 0)`, if the queue is momentarily full, the event is dropped and logged as a warning rather than ever blocking.
+
+This queue exists specifically to keep the slow, occasionally-flaky HTTPS POST call off `stm32_uart_task` entirely. An earlier version made the HTTPS call directly from the UART-reading task; when that call blocked or was slow, the STM32's internal UART ring buffer would overflow in the meantime and corrupt subsequent lines, since the STM32 keeps transmitting on its own schedule with no flow control back to the ESP32. `sheets_log_task` drains this queue independently, so a slow network call now only delays a Sheets log entry, never the UART read loop itself.
+
+### Persistent HTTP clients and the DNS race
+
+All calls to the Apps Script backend (`script.google.com`) go through one of two **persistent, reused** `esp_http_client` handles, one for POST, one for GET, created once on first use and kept alive rather than a fresh `init`/`cleanup` pair per call. A from-scratch TCP+TLS handshake was measured taking 1-4+ seconds on this chip; once `live_update_task` started firing every few seconds on top of the other tasks, that handshake cost alone was consuming most of the interval (a 3-second target interval measured at 7-15 seconds actual).
+
+Both clients are only ever used under a single `s_apps_script_mutex`, serializing every call to `script.google.com` across tasks. This isn't just about avoiding response buffer collisions, lwIP's DNS resolver has a limited number of concurrent outstanding lookups per hostname, and two tasks racing a lookup for the same hostname at once was causing intermittent `getaddrinfo()` failures. Serializing avoids that race entirely.
+
+If a call fails (`err != ESP_OK`), both `apps_script_post()` and `apps_script_get()` reset the corresponding client (cleanup and recreate) and retry exactly once before giving up, a single transient failure doesn't need a full client teardown on every occurrence, but a client stuck in a bad state shouldn't be reused indefinitely either.
+
+### POST vs GET redirect handling
+
+Apps Script's web app always responds to requests with a redirect. POST actions (`log_reading`, `submit_explanation`) never follow it, Apps Script executes the POST's side effect (writing to the sheet) *before* issuing the redirect, so a 302 response already confirms success, and the response body is never needed for these actions.
+
+GET actions (`check_trigger`, `get_explanation`, live data fetches) do need the response body, since the redirect target (a `script.googleusercontent.com` echo endpoint) is where the actual JSON lives. The redirect here is followed **manually**: `esp_http_client_set_redirection()` is called explicitly, with the response buffer cleared before the follow-up request. Automatic redirect handling was tried first and reverted, `esp_http_client`'s automatic mode still fires the body event handler for the intermediate 302 page's HTML before internally following the redirect, and there's no hook to clear the shared buffer in between. That meant the 302 page's HTML and the final JSON response ended up concatenated in the same buffer on every call, which is why `check_trigger`'s response consistently failed to parse as JSON even though the HTTP call itself reported success. This was the actual root cause of the Gemini explanation flow never completing.
+
+### Task architecture
+
+| Task | Priority | Responsibility |
+|---|---|---|
+| `stm32_uart_task` | 5 | Reads UART byte-by-byte, parses JSON lines, updates shared reading, queues change-based log events |
+| `gateway_poll_task` | 5 | Polls `check_trigger` every 5s, calls Gemini and submits the explanation when triggered |
+| `sheets_log_task` | 4 | Drains the log queue, performs the actual HTTPS POST to log a fault class change |
+| `live_update_task` | 3 | Pushes the latest reading to the dashboard's live data source every 2.5s, independent of change-based logging |
+
+`live_update_task` runs on a fixed timer rather than firing on every new STM32 reading, since the dashboard only needs to feel live at human-perceptible speed, not at the full inference rate.
