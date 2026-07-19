@@ -292,3 +292,56 @@ The script prints a per-file summary (`candidate_rows`, `kept`, `dropped`) and w
 ### A capture bug that was actually a symptom of something bigger
 
 A printf/menu corruption bug traced during this phase turned out to be the entry point into a much larger issue: `_write()` was starting a UART DMA transfer and returning immediately, without confirming the hardware had actually finished, before printf's internal buffer was safe to reuse. Fixing that correctly (blocking on the transfer-complete semaphore) had a second-order effect: every `printf` call now legitimately held its calling task's stack frame open for the real transfer time (~13ms at 115200 baud) instead of returning instantly, which is what actually exposed the three-task stack overflow chain described in [Section 7](#hardening-arc). The capture pipeline's own corruption bug and the project's most serious hardening arc share the same root cause.
+## Model Training (NanoEdge AI Studio)
+
+### First pass: SVM, trained on unreliable capture data
+
+The first full capture round (all 9 speed/class combinations, [Section 8](#data-capture-pipeline)) was unstable at the data level before any model was trained. Window counts per file were inconsistent, ranging roughly **50 to 150** rows instead of a fixed expected count, and captures had to be repeated multiple times per combination to land on the best available file.
+
+A benchmark was run on this data anyway. NanoEdge AI Studio selected an SVM model:
+
+| Metric | Value |
+|---|---|
+| Quality index | 99pt |
+| Balanced accuracy (benchmark) | 100% |
+| RAM footprint | ~1.9 KB |
+| Flash footprint | ~2.3 KB |
+| Inference time | ~0.3 ms |
+
+<!-- SCREENSHOT PLACEHOLDER: NanoEdge Studio benchmark result screen for the SVM model -->
+
+This SVM was flashed onto the STM32 and tested live. Speed 2 and 3 fault detection was correct across classes, but **speed 1 fault detection consistently failed**.
+
+### Root cause: the stack overflow, not the model
+
+The inconsistent, wildly varying row counts during capture were the real signal, a fixed-size capture protocol producing a randomly varying row count per run points at a data integrity problem, not a modeling one. This is what prompted the ST-LINK debugging session in [Section 7](#hardening-arc), which found silent stack overflows corrupting memory across three separate tasks.
+
+Two changes were made before the next capture round, not one:
+1. The three stack overflows were fixed
+2. **The sponge previously used as a gap-filler under the STM32 board mount was removed entirely** ([Section 3](#hardware)), the board now sits directly against the motor housing, held only by the zip ties
+
+Because both changes happened together, it isn't possible to cleanly isolate which one actually resolved the speed 1 problem, the corrupted capture data alone is a fully sufficient explanation on its own, but the sponge's removal could plausibly have also improved vibration coupling at the specific low-amplitude signal levels speed 1 produces. Both are documented here rather than picking one as the sole cause without evidence.
+
+### Second pass: clean recapture, CNN selected
+
+All 9 combinations were recaptured from scratch under the new conditions, at 350 windows per file, verified clean via `wc -l` and field-count checks with zero dropped rows across every file ([Section 8](#data-capture-pipeline)).
+
+This clean dataset was benchmarked once. This time NanoEdge AI Studio selected a different architecture, a CNN:
+
+| Metric | Value |
+|---|---|
+| Model | CNN (library #57) |
+| Quality index | 99pt |
+| Balanced accuracy (benchmark) | 100% |
+| RAM footprint | ~1.8 KB |
+| Flash footprint | ~2.9 KB |
+
+<!-- SCREENSHOT PLACEHOLDER: NanoEdge Studio benchmark result screen for the CNN model, showing library #57 -->
+
+### Deployment bug: class name mapping
+
+The generated `NanoEdgeAI.h` diffed identically against the previous SVM build except for the model ID (`NEAI_ID`), a clean drop-in replacement at the header level. However, this CNN build's `neai_get_class_name()` returned raw index characters instead of proper class name strings, a library-level quirk rather than an integration mistake. Fixed with a hardcoded `class_names[]` array in firmware (`{"obstruction", "imbalance", "healthy"}`), ordered to match the class indices verified against the model's own metadata.
+
+### Current validated state
+
+With the clean recapture, the direct-mounted sensor, and the CNN deployed, fault detection across all three speeds became correct, resolving the speed 1 failure seen with the first SVM. Full class-by-class, speed-by-speed validation is covered in the proof-of-work capture in [Section 14](#proof-of-work).
