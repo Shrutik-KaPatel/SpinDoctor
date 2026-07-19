@@ -544,3 +544,52 @@ A single composite score (0-100) is computed as a weighted blend: 35% current cl
 Requesting an explanation POSTs `request_explanation` (setting the Apps Script trigger flag, [Section 12](#cloud-integration-gemini--apps-script--sheets)), then polls `check_trigger` every 3 seconds, with a 60-second timeout. Completion is detected specifically by the **trigger flag going back to `false`** (meaning the ESP32's `gateway_poll_task` picked it up, called Gemini, and submitted the result), not by comparing explanation text before and after. This distinction is called out directly in the code as a deliberate fix: two requests for a genuinely unchanged fault state can legitimately produce identical or near-identical wording from Gemini, and an earlier text-diff-based completion check would wait indefinitely for a "change" that might never come. Watching the trigger flag itself is a correct completion signal regardless of whether the returned text happens to differ from the last one.
 
 Each explanation request also snapshots the reading it was requested against (`contextEl` displays `fault_class`, `confidence`, `temp_c` at request time), so if the fan's state changes while a request is still in flight, the person reviewing the result can see which reading the explanation actually corresponds to.
+## Proof of Work
+
+### Method
+
+Each of the 9 speed/class combinations, plus a 10th unseen-combination test, was run live on deployed hardware and captured two ways simultaneously: a `minicom` capture-to-file session logging the raw `InferenceTask` UART output line by line, and a screenshot of the live dashboard reflecting the same reading in real time. Both are shown side by side for each case below, raw serial output on the left, the rendered dashboard on the right, so the result can be checked against the actual device output, not just the visualization layer. Every case was run multiple times with consistent, correct results across repeats.
+
+### The 9 speed x class combinations
+
+| Speed | Class | Result |
+|---|---|---|
+| 1 | Healthy | Correct, 100% confidence, stable |
+| 1 | Imbalance | Correct, 100% confidence, stable |
+| 1 | Obstruction | Correct, 100% confidence, stable |
+| 2 | Healthy | Correct, 100% confidence, stable |
+| 2 | Imbalance | Correct, 100% confidence, stable |
+| 2 | Obstruction | Correct, 100% confidence, stable |
+| 3 | Healthy | Correct, high confidence (88-100%, natural noise, never misclassified) |
+| 3 | Imbalance | Correct, 100% confidence, stable |
+| 3 | Obstruction | Correct, high confidence (92-100%, natural noise, never misclassified) |
+
+<p align="center">
+  <img src="Docs/Images/1H.png" alt="Speed 1 healthy" width="800"/>
+</p>
+
+<p align="center">
+  <img src="Docs/Images/2O.png" alt="Speed 2 obstruction" width="800"/>
+</p>
+
+<p align="center">
+  <img src="Docs/Images/3I.png" alt="Speed 3 imbalance" width="800"/>
+</p>
+
+A worthwhile detail from the speed 1 obstruction capture: partway through that session the physical obstruction was removed while the capture was still running. The classifier tracked the transition smoothly rather than flipping abruptly, confidence in `healthy` climbed gradually through 51%, 71%, 95%, before settling at 100%, correctly reflecting a genuinely gradual real-world change rather than reporting a hard, instantaneous switch. This is a small but meaningful sign of a well-behaved classifier: it expressed graded uncertainty exactly while the physical state was itself genuinely ambiguous (obstruction partially removed), not before or after.
+
+### The 10th test: an unseen fault combination
+
+The classifier was trained on three mutually exclusive classes, healthy, imbalance, obstruction, it has never seen a case where imbalance and obstruction are induced simultaneously. To see how it behaves outside its training distribution, blade imbalance and obstruction were induced together at speed 2:
+
+<p align="center">
+  <img src="Docs/Images/2IO.png" alt="Speed 2, combined imbalance and obstruction (unseen combination)" width="800"/>
+</p>
+
+The classifier settled on `obstruction` as its answer, but at a meaningfully **lower confidence than any clean single-fault case**, 64%, with `healthy` at 16% and the remainder split toward `imbalance`. This is a genuinely informative result rather than a failure: rather than confidently reporting a wrong or arbitrary answer, the system reflects real uncertainty when faced with a physical situation outside anything it was trained to classify. For a predictive-maintenance system, a lower-confidence flag on an unfamiliar combined fault is a more useful and honest behavior than false confidence would be, it's a signal a technician should actually pay attention to, not dismiss.
+
+### Dashboard reference
+
+<p align="center">
+  <img src="Docs/Images/Dashboard.png" alt="SpinDoctor live dashboard" width="800"/>
+</p>
