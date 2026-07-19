@@ -1,5 +1,3 @@
-> ✍️ **Note:** This full technical writeup, covering every architecture decision, bug, and fix, is being finalized and will be published here shortly. The system itself is complete and the **[live dashboard](https://shrutik-kapatel.github.io/SpinDoctor/)** is up and running. An accompanying LinkedIn deep-dive is also on the way.
-
 # SpinDoctor: Technical Writeup
 
 This document is the full engineering log for SpinDoctor: every architecture decision, bug found, and fix made, from raw sensor data to a deployed on-device AI model to a live cloud-connected dashboard.
@@ -715,3 +713,89 @@ This section is written for a reviewer who wants to reproduce or inspect the sys
 5. Serve `index.html` however you like, GitHub Pages, or just opening it locally, it makes no server-side calls of its own beyond `fetch()` requests to the Apps Script URL.
 
 **Not independently verified in this section:** whether any Apps Script deployment-specific quirks (execution quotas, the exact "Anyone" vs "Anyone with Google account" access setting) affect first-time setup, since this repo's own deployment was configured once and not tested as a fresh reproduction.
+## Appendix
+
+### Full FreeRTOS reference (STM32)
+
+**Tasks**
+
+| Task | Priority | Stack (words) | Responsibility |
+|---|---|---|---|
+| AccelTask | `osPriorityNormal` (highest) | 512 | Polls a data-ready flag set by the SPI/DMA interrupt chain, fills ping-pong capture buffers, signals when a full window is ready |
+| CaptureTask | `osPriorityBelowNormal` | 512 | Runs the interactive UART menu used to select fan speed/fault class and record training data |
+| InferenceTask | `osPriorityBelowNormal` | 1024 | Runs the on-device classifier on each completed sample window, builds and transmits the JSON result over USART3 |
+| DHT11Task | `osPriorityLow` | 256 | Bit-banged temperature read every 3s; purely informational |
+| WatchdogTask | `osPriorityLow` | 512 | Refreshes the IWDG watchdog every 500ms; also prints the reset-cause diagnostic once at boot |
+
+**Mutexes**
+
+| Mutex | Protects | Notes |
+|---|---|---|
+| `diagnosticsMutexHandle` | Shared diagnostics struct (accelerometer values, temperature/humidity) | Written by AccelTask, DHT11Task; read by InferenceTask for `temp_c` |
+| `printfMutexHandle` | The underlying print call and C library formatting state | Deliberately bypassed in `vApplicationStackOverflowHook`, which uses direct blocking `HAL_UART_Transmit` instead |
+
+**Semaphores**
+
+| Semaphore | Signals | Notes |
+|---|---|---|
+| `uartTxSemaphoreHandle` | UART DMA transmission in flight | `_write()` waits, starts DMA, waits again with a bounded 200ms timeout; DMA-mode only, never paired with blocking-mode transmit |
+| `captureDataReadyHandle` | A full 64-sample window is ready in the ping-pong buffer | Shared between CaptureTask and InferenceTask; `capture_active` flag determines the intended consumer |
+| `captureRxByteReadyHandle` | A byte has arrived over the capture menu's UART | Used by CaptureTask to block on user input without busy-waiting |
+
+**FreeRTOSConfig.h key values**
+
+| Setting | Value | Relevance |
+|---|---|---|
+| `configCHECK_FOR_STACK_OVERFLOW` | `2` | Method 2 stack-checking, fills each stack with a known pattern and validates on every context switch |
+| `configENABLE_FPU` | `1` (corrected from `0`) | Required for correct/fast SVM/CNN floating-point math in InferenceTask |
+| `configUSE_NEWLIB_REENTRANT` | `1` | Gives each task its own reentrant C library context; not sufficient alone, `printfMutexHandle` still required |
+| `configTOTAL_HEAP_SIZE` | 15360 bytes | |
+| `configMINIMAL_STACK_SIZE` | 128 words | Default floor tasks started from before being tuned up per the stack overflow investigation |
+| `configMAX_PRIORITIES` | 7 | |
+
+### ESP32 task and synchronization reference
+
+| Task | Priority | Responsibility |
+|---|---|---|
+| `stm32_uart_task` | 5 | Reads UART byte-by-byte, parses JSON lines, updates the shared reading, queues change-based log events |
+| `gateway_poll_task` | 5 | Polls `check_trigger` every 5s, calls Gemini and submits the explanation when triggered |
+| `sheets_log_task` | 4 | Drains the log queue, performs the HTTPS POST to log a fault class change |
+| `live_update_task` | 3 | Pushes the latest reading to the dashboard's live data source every 2.5s |
+
+| Primitive | Purpose |
+|---|---|
+| `s_wifi_event_group` | WiFi connect/fail bits for station bring-up |
+| `s_reading_mutex` | Guards `s_latest_reading`, read by both `live_update_task` and `gateway_poll_task` |
+| `s_apps_script_mutex` | Serializes every call to `script.google.com` across tasks, avoids both response buffer collisions and a DNS resolver race |
+| `s_log_queue` | Decouples the slow HTTPS log POST from the UART-reading task |
+
+### Full pin mapping
+
+| Signal | STM32 Pin | Peripheral | Notes |
+|---|---|---|---|
+| LIS3DSH accelerometer | Internal (onboard) | SPI1 | No external wiring, built into the Discovery board |
+| DHT11 data line | PB6 | Bit-banged, DWT-timed | Single-wire protocol |
+| USART3 TX (to ESP32 RX) | PB10 | USART3 | Chosen over USART1 to avoid the onboard audio codec pin conflict |
+| USART3 RX (from ESP32 TX) | PB11 | USART3 | |
+| Capture menu UART | USART2 | USART2 | Interrupt-driven RX, DMA TX, connects to the ST-LINK's virtual COM port |
+
+| Signal | ESP32 Pin | Peripheral | Notes |
+|---|---|---|---|
+| UART RX (from STM32 TX) | GPIO16 | `UART_NUM_2` | |
+| UART TX (to STM32 RX) | GPIO17 | `UART_NUM_2` | |
+
+### NVS partition layout (ESP32)
+
+| Name | Type | SubType | Offset | Size |
+|---|---|---|---|---|
+| nvs | data | nvs | 0x9000 | 0x6000 |
+| phy_init | data | phy | 0xf000 | 0x1000 |
+| factory | app | factory | 0x10000 | 1M |
+| creds | data | nvs | 0x110000 (auto) | 0x3000 |
+
+### Links
+
+- Live dashboard: https://shrutik-kapatel.github.io/SpinDoctor/
+- Repository: https://github.com/Shrutik-KaPatel/SpinDoctor
+- Portfolio: https://shrutik-kapatel.github.io/
+- LinkedIn: *(will published soon)*
