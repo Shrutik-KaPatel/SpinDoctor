@@ -216,3 +216,10 @@ The LIS3DSH pulses its DRDY pin on an external interrupt line every ~2.5ms (400H
 ### A design principle worth naming
 
 Task stack sizes and FreeRTOS configuration are treated as living tuning parameters, not fixed at design time. Every task's stack size in this project was revised at least once after real evidence (a stack overflow, see [Section 7](#hardening-arc)) rather than guessed upfront and left alone. CubeMX's `.ioc` file is kept as the single source of truth for these values, rather than hand-editing generated config headers directly.
+## The FFT Detour
+
+Before committing to NanoEdge AI for classification, a CMSIS-DSP FFT pipeline was built to validate that the accelerometer was actually picking up genuine mechanical signal, not just noise. It worked: the FFT confirmed a real, distinct blade-pass frequency that matched the fan's independently measured RPM, useful proof that the sensing pipeline itself was sound before investing further in a classification approach.
+
+However, it also introduced an intermittent reset bug, and once it became clear that NanoEdge AI performs its own frequency-domain feature extraction internally, a hand-built FFT stage upstream of it was redundant. The FFT pipeline was deliberately retired rather than debugged further.
+
+This is documented here as an engineering decision, not a failure: it served its purpose (validating the sensor), and was removed once it stopped adding value, rather than being kept out of sunk-cost attachment.
