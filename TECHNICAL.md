@@ -623,3 +623,54 @@ A few items that might look like open limitations at first glance are, as of [Se
 ### Behavior on unseen fault combinations
 
 The classifier was trained on three mutually exclusive classes and has never seen simultaneous imbalance and obstruction. [Section 14](#proof-of-work)'s combined test showed it responds to this with a meaningfully lower-confidence call (64%, versus 100% on every clean single-fault case) rather than a confidently wrong one, this is treated here as expected, reasonable behavior for a model outside its training distribution, not a defect to fix, but it's worth noting this is the only fault combination actually tested against, other unseen combinations or intermediate/borderline physical states haven't been characterized.
+markdown
+## Repository Structure
+
+```
+SpinDoctor/
+├── Docs/
+│   └── Images/                     # Screenshots and photos referenced throughout
+│                                     README.md and TECHNICAL.md
+├── backend/
+│   └── apps-script/
+│       └── Code.gs                 # doGet/doPost multiplexed backend, Sheets logging,
+│                                     Live ring buffer, Control mailbox
+├── data/
+│   ├── raw/                        # Unprocessed capture artifacts
+│   └── speed{1,2,3}_{healthy,imbalance,obstruction}.log
+│       speed{1,2,3}_{healthy,imbalance,obstruction}_clean.csv
+│                                    # 9 raw/cleaned pairs (3 speeds x 3 classes),
+│                                     verified via wc -l / awk before NanoEdge import
+├── firmware/
+│   ├── esp32/
+│   │   └── spindoctor_gateway/     # ESP-IDF project: WiFi, UART parse, Gemini calls,
+│   │                                 Apps Script client, partitions.csv
+│   └── stm32/
+│       └── SpinDoctor_STM32/       # CubeIDE project: FreeRTOS tasks, NanoEdge inference,
+│                                     UART capture menu, hardening fixes
+├── models/                         # Placeholder for exported NanoEdge AI libraries;
+│                                     currently empty, the deployed model is integrated
+│                                     directly into the STM32 firmware project rather
+│                                     than versioned here separately
+├── tools/
+│   └── clean_captures.py           # Two-pass capture cleaning script (Section 8)
+├── .gitignore
+├── PROGRESS.md                     # Append-only, dated session log
+├── README.md                       # Recruiter-facing overview
+├── TECHNICAL.md                    # This document
+└── index.html                      # Live GitHub Pages dashboard
+```
+
+Note on `models/`: the folder exists as a placeholder (a lone `.gitkeep`) but isn't currently used to version the exported NanoEdge libraries across training iterations the way it was originally intended to. The deployed SVM and then CNN artifacts ([Section 9](#model-training-nanoedge-ai-studio)) live directly inside the STM32 firmware project instead. Worth treating `models/` as either genuinely populated going forward, or removed, rather than left as an unused placeholder.
+
+### PROGRESS.md vs README.md vs TECHNICAL.md
+
+Three documents serve three different, deliberately non-overlapping purposes:
+
+- **`PROGRESS.md`** is an append-only logbook, `Session N` entries, no timestamps, never edited or rewritten after the fact. It's the raw, chronological record of what actually happened session by session, including dead ends, and is committed directly to `main` rather than through a PR, since a logbook that goes through review isn't really a logbook.
+- **`README.md`** is the current-state snapshot, written for a recruiter or reviewer who wants the fastest possible accurate picture of what the project is and does, not a full history of how it got there.
+- **`TECHNICAL.md`** (this document) is the full engineering narrative, every architecture decision, bug, and fix, written to be read start to finish by someone evaluating the depth of the actual work, not just its outcome.
+
+### Branching and commit discipline
+
+All code changes go through feature branches merged via pull request, even working solo, since the PR description becomes a permanent, browsable record of *why* a change was made, not just *what* changed. `PROGRESS.md` is the one exception, committed directly to `main`, since routing a logbook entry through review adds friction without adding value. Every `PROGRESS.md` entry that references a commit uses a real hash pulled via `git log -1 --format=%h` at the time of writing, never a placeholder.
