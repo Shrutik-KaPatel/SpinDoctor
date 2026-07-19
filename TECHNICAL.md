@@ -593,3 +593,33 @@ The classifier settled on `obstruction` as its answer, but at a meaningfully **l
 <p align="center">
   <img src="Docs/Images/Dashboard.png" alt="SpinDoctor live dashboard" width="800"/>
 </p>
+
+## Known Limitations and What's Left
+
+### Gemini prompt: designed rich, shipped simple
+
+The deployed `call_gemini()` sends a bare three-field prompt (`fault_class`, `confidence`, `temp_c`) rather than the richer, evidence-grounded design worked out and validated earlier in the project (per-axis vibration data, RPM, confidence breakdown, trend history, an explicit system-instructions field with grounding rules). This is the single most concrete, well-scoped piece of unfinished work in the system: the STM32 already computes richer per-axis data, and the Apps Script `Live` tab already stores it, so closing this gap is a matter of extending `call_gemini()`'s request body and adding a `system_instruction` field, not building new infrastructure. See [Section 12](#cloud-integration-gemini--apps-script--sheets) for the full detail.
+
+### WatchdogTask priority
+
+`WatchdogTask` runs at `osPriorityLow`, tied with `DHT11Task`, contradicting an explicit principle from earlier practice work that a watchdog should run at a *higher* priority than the tasks it's meant to catch, otherwise a sufficiently misbehaving task could starve the watchdog itself out. This wasn't a deliberate re-decision, it's a byproduct of how priorities landed while assigning the other four tasks ([Section 5](#firmware-architecture-stm32-side)). It currently works because no task in the deployed system has actually starved the scheduler long enough to expose the gap, but it's a known, latent risk rather than a resolved one.
+
+### CNN inference time not independently measured
+
+The deployed CNN's own inference time was never benchmarked separately from the earlier SVM's ~0.3ms figure ([Section 10](#on-device-inference-integration)). Given the CNN's flash footprint is comparably small (~2.9KB vs the SVM's ~2.3KB), it's a reasonable assumption that inference time remains a small fraction of the ~160ms window budget, but this is currently an assumption, not a verified number.
+
+### What was resolved, not left open
+
+A few items that might look like open limitations at first glance are, as of [Section 14](#proof-of-work), actually resolved:
+- **Obstruction detection at all 3 speeds**, including speed 1, is confirmed clean and stable across repeated live tests, this was previously an open verification item and is now closed.
+- **Speed 1 classification generally** is reliable post-CNN-retrain across all three trained classes.
+- **The compliant sponge mount** was removed entirely during the hardening/recapture cycle ([Section 9](#model-training-nanoedge-ai-studio)); the board is now direct-mounted with no material in the vibration path. A formal before/after FFT comparison of the sponge's actual effect was never carried out (the FFT pipeline itself was retired before this point, [Section 6](#the-fft-detour)), so its precise contribution, versus the stack overflow fix, to resolving the original speed 1 problems can't be fully isolated. Documented as an acknowledged gap in causal attribution, not a functional issue.
+
+### Deliberately out of scope
+
+- **RPM sensing via Hall sensor and Timer Input Capture** was built, worked correctly in isolation, and was deliberately descoped after the magnet needed for reliable detection introduced a real, physically significant rotor imbalance of its own ([Section 3](#hardware)). The accelerometer alone provides a complete signal for all three trained fault classes; RPM was only ever meant as a secondary correlating signal. A working implementation is preserved on a separate branch.
+- **HC-05 Bluetooth bring-up** (Group F in the pre-capstone mini-project sequence) was never used, planned for integration, or placed on the capstone's critical path. It exists only as an isolated bring-up exercise in the separate practice repository and has no bearing on SpinDoctor itself.
+
+### Behavior on unseen fault combinations
+
+The classifier was trained on three mutually exclusive classes and has never seen simultaneous imbalance and obstruction. [Section 14](#proof-of-work)'s combined test showed it responds to this with a meaningfully lower-confidence call (64%, versus 100% on every clean single-fault case) rather than a confidently wrong one, this is treated here as expected, reasonable behavior for a model outside its training distribution, not a defect to fix, but it's worth noting this is the only fault combination actually tested against, other unseen combinations or intermediate/borderline physical states haven't been characterized.
