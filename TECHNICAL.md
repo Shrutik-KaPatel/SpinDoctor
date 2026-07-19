@@ -479,3 +479,68 @@ Two separate logging paths exist deliberately: `log_reading` only fires when `fa
 Every `doGet` and `doPost` handler is wrapped in try/catch, returning a JSON error object rather than letting an exception escape. This matters because an uncaught exception in Apps Script returns Google's own raw HTML error page, which carries no CORS header. From the dashboard's side, this is indistinguishable from a generic CORS failure, the browser blocks the response before the dashboard's JS ever sees a status code or body to inspect, so what's actually a server-side exception looks identical to a network or CORS misconfiguration. Wrapping every handler ensures a real error still comes back as a valid, CORS-compliant JSON response the dashboard can parse and handle explicitly.
 
 The `get_live`/default-GET error path returns a differently-shaped error (`[['error'], [String(err)]]`, an array of rows) rather than an error object, since the dashboard's front-end code expects an array of rows from these two endpoints specifically, and a shape mismatch on error would just trade a clear error for a confusing parse failure downstream.
+## Dashboard
+
+### Visual design evolution
+
+The dashboard went through several complete visual redesigns before landing on its current form: an early flat SVG stacked-area chart, a 3D linear bar wall, a 3D arc-reactor pulse ring, an intermediate fan digital twin, and finally the current design, a levitating turbine with swept extruded blades, counter-rotating guard rings, a pulsing core, and a repulsor-beam base, styled as a JARVIS/HUD-style interface using Orbitron and Share Tech Mono fonts. Each iteration wasn't purely cosmetic, the goal throughout was finding a visualization that could communicate fault state at a glance without reading numbers, which is what motivated moving from flat charts toward a literal spinning representation of the fan itself.
+
+### Live data pipeline
+
+`pollLive()` runs on a fixed 2.5-second interval, fetching the `Live` tab via the Apps Script `get_live` action ([Section 12](#cloud-integration-gemini--apps-script--sheets)) with `cache: 'no-store'` to avoid the browser serving a stale cached response. Each row is parsed and explicitly validated (`cls` present, timestamp parses, `confidence` and `temp_c` are real numbers) before being accepted into the working buffer, any row that fails this check is silently dropped rather than rendered. This guards against reading a row that was only partially written, if the browser's fetch happens to overlap the exact moment the ESP32 is mid-write to the ring buffer, a malformed row is a real possibility, not just a theoretical one.
+
+### Offline detection
+
+Staleness is judged from the **latest row's own timestamp**, not from whether the fetch itself succeeded:
+
+```js
+const dataAgeMs = Date.now() - latest.ts.getTime();
+const isStale = dataAgeMs > OFFLINE_AFTER_MS;  // 90000ms
+```
+
+This distinction matters because the `Live` tab keeps its last rows indefinitely, so a successful fetch returning old data (because the ESP32 has actually died) looks identical, at the network level, to a successful fetch returning current data. Only by checking the age of the newest row's own timestamp can the dashboard tell the difference between "the fan is fine and just hasn't reported in a moment" and "the fan has been offline for a while but the sheet still holds its last known state." Once stale for more than 90 seconds, `fcOnline` flips to `false`, the whole HUD switches to a muted gray theme (`body.offline`), fault-class-specific coloring is suppressed, and the digital twin's spin target drops to zero so it visibly winds down rather than spinning forever on data that's no longer real.
+
+### Cinematic revival
+
+When a fresh row arrives after being stale, `fcBootT` is set to the current timestamp, which the render loop uses to drive a ~2.5 second camera sweep and a core glow flash (smoothstep-eased), the same mechanism used for the very first page load. This means reconnection after an outage isn't just a silent state flip, it's visually distinct from ordinary operation, deliberately framed as a "power-up" moment rather than an invisible background change.
+
+### The turbine as a fault indicator
+
+Motion, not just color, encodes fault state. The blade group's target rotation speed is set per class:
+
+| State | Behavior |
+|---|---|
+| Healthy | Fast (`10.0`), smooth spin, no wobble |
+| Imbalance | Slightly slower (`7.5`), with a sinusoidal wobble applied to the whole fan group's rotation, visibly "off-axis" |
+| Obstruction | Very slow and irregular (`1.4 ± 1.25`, sinusoidal), a visible stutter rather than a steady spin |
+| Offline | Target speed `0`, easing down rather than stopping instantly |
+
+Actual spin velocity eases toward this target rather than snapping to it (`fcSpinVel += (targetSpeed - fcSpinVel) * min(1, dt * 1.6)`), giving a natural wind-up on boot/revival and a natural wind-down on going offline, rather than an abrupt, mechanical-looking jump.
+
+### History halo
+
+The turbine is surrounded by a ring of up to 100 small colored segments, one per buffered reading, positioned at a fixed angular step regardless of how many readings are currently buffered. This is a deliberate honesty choice: the ring is always divided into 100 slots, so a freshly-booted dashboard with only a handful of readings shows a visibly sparse, partially-filled ring rather than stretching a few points to fill the whole circle and implying more history exists than actually does. The newest reading sits at 12 o'clock with a small marker, older readings wrap clockwise behind it.
+
+### Replay
+
+The replay button re-walks the last buffered readings one at a time at a fixed 120ms step, driving the same turbine visualization as live data (`effClass`/`effOnline` are overridden during replay rather than reading the live state), while the state readout text is overridden to show which buffered reading is currently being replayed and its original timestamp. Replay reuses the same boot camera sweep for a deliberate dramatic start, and on completion, returns the twin status badge and state readout to whatever the actual live/offline state currently is, rather than leaving it in whatever state replay happened to end on.
+
+### Signal analytics
+
+Several derived metrics are computed client-side from the buffered readings, not sent by the backend:
+
+- **Margin**: the gap between the top and second-highest class probability in the latest reading, a small margin signals the classifier is genuinely uncertain between two classes, not just reporting a class with low absolute confidence
+- **Flap count**: the number of fault-class changes within the last 20 readings, a system oscillating rapidly between classes is a different (and arguably more concerning) situation than one that made a single clean transition
+- **Temperature slope**: a linear regression of temperature against time (minutes) over the buffered readings, giving a signed rate of change rather than just a snapshot
+- **Average temperature by class**: mean temperature grouped by fault class, useful for spotting whether a fault class correlates with a temperature difference
+- **Sensor glitch detection**: flags when temperature jumps by more than 3°C between two consecutive readings, a physically implausible jump for a fan's thermal mass over a ~2.5s interval, more likely a sensor read glitch than a real thermal event
+
+### Equipment health score
+
+A single composite score (0-100) is computed as a weighted blend: 35% current classification confidence, 25% margin between top two classes, 20% a stability score penalizing recent class flapping (`100 - flaps * 10`), and 20% a temperature stability score penalizing a steep recent temperature slope. This isn't a scientifically derived formula, it's a deliberately simple, explainable heuristic that gives a single at-a-glance number, weighted toward confidence and margin (60% combined) since those most directly reflect how sure the classifier is right now, with stability terms accounting for the remaining 40%.
+
+### Gemini explain flow and the completion-detection fix
+
+Requesting an explanation POSTs `request_explanation` (setting the Apps Script trigger flag, [Section 12](#cloud-integration-gemini--apps-script--sheets)), then polls `check_trigger` every 3 seconds, with a 60-second timeout. Completion is detected specifically by the **trigger flag going back to `false`** (meaning the ESP32's `gateway_poll_task` picked it up, called Gemini, and submitted the result), not by comparing explanation text before and after. This distinction is called out directly in the code as a deliberate fix: two requests for a genuinely unchanged fault state can legitimately produce identical or near-identical wording from Gemini, and an earlier text-diff-based completion check would wait indefinitely for a "change" that might never come. Watching the trigger flag itself is a correct completion signal regardless of whether the returned text happens to differ from the last one.
+
+Each explanation request also snapshots the reading it was requested against (`contextEl` displays `fault_class`, `confidence`, `temp_c` at request time), so if the fan's state changes while a request is still in flight, the person reviewing the result can see which reading the explanation actually corresponds to.
