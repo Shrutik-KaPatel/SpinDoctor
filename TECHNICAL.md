@@ -430,3 +430,52 @@ GET actions (`check_trigger`, `get_explanation`, live data fetches) do need the 
 | `live_update_task` | 3 | Pushes the latest reading to the dashboard's live data source every 2.5s, independent of change-based logging |
 
 `live_update_task` runs on a fixed timer rather than firing on every new STM32 reading, since the dashboard only needs to feel live at human-perceptible speed, not at the full inference rate.
+## Cloud Integration: Gemini + Apps Script + Sheets
+
+### The Gemini prompt: designed rich, shipped simple
+
+Before any ESP32 firmware existed, a richer prompt design was worked out and validated conceptually in Google AI Studio: a system-instructions field describing six input fields (fault class, per-class confidence, per-axis vibration frequency/magnitude, RPM, temperature, and a short history of recent readings), with explicit rules requiring the model to ground its explanation in specific numbers, flag ambiguous confidence scores, describe trends rather than just a snapshot, and never invent data. A thin payload and a rich payload were hand-pasted side by side to confirm the richer version actually produced a meaningfully different, more grounded explanation before committing to build it into firmware.
+
+That design was never carried into the deployed integration. The actual `call_gemini()` in `spindoctor_gateway.c` sends a single-sentence prompt built from just three fields:
+
+```c
+"Explain this fan diagnostic reading in plain English, 2-3 sentences: "
+"fault class %s, confidence %.2f, temperature %.1fC."
+```
+
+No system instructions field, no per-axis vibration data, no RPM, no history. This is a real, honest gap between what was designed and what shipped, not a case of the simpler version being a deliberate later simplification. It's flagged here as a concrete, scoped item for [Section 15](#known-limitations-and-whats-left) rather than glossed over: the plumbing to support the richer payload already exists everywhere else in the system (the STM32 already computes and could transmit richer per-axis data, the Apps Script `Live` tab already stores it), the missing piece is solely in how `call_gemini()` builds its request body.
+
+### Apps Script backend
+
+`backend/apps-script/Code.gs` is a single web app multiplexing on an `action` field in both `doGet` and `doPost`:
+
+| Action | Method | Purpose |
+|---|---|---|
+| `log_reading` | POST | Appends a row to `Sheet1` (timestamp, fault class, temp, note), the append-only historical log |
+| `update_live` | POST | Appends a row to the `Live` tab (timestamp, fault class, confidence, per-class scores, temp), trimmed to the most recent 100 rows |
+| `request_explanation` | POST | Sets `Control!A2` to `true`, the trigger flag `gateway_poll_task` watches for |
+| `submit_explanation` | POST | Writes the Gemini explanation to `Control!B2` and clears the trigger flag |
+| `check_trigger` | GET | Returns whether `Control!A2` is currently `true` |
+| `get_explanation` | GET | Returns the current value of `Control!B2` |
+| `get_live` | GET | Returns the full `Live` tab as row data, for the dashboard |
+| *(none)* | GET | Default: returns `Sheet1`'s full row data |
+
+`Control!A2`/`B2` act as a single-slot mailbox: one boolean trigger, one text explanation, rather than a queue. This is intentional given the system's usage pattern (a technician requesting one explanation at a time), not a general-purpose message queue.
+
+### Live ring buffer
+
+The `Live` tab is capped at 100 rows by deleting row 2 (the oldest data row, row 1 being the header) whenever a new `update_live` append pushes the sheet past 101 total rows. This keeps the dashboard's live data source bounded regardless of how long the system runs, rather than growing `Live` indefinitely the way `Sheet1`'s historical log does.
+
+### Zero-value handling
+
+`orBlank()` exists because Apps Script's `appendRow()` and JavaScript's own falsy-value handling would otherwise write an empty cell for a legitimate `0` confidence or temperature reading, indistinguishable from a genuinely missing field. `orBlank()` only substitutes an empty string for `undefined` or `null`, not for `0`, preserving the distinction between "field was zero" and "field was absent."
+
+### Change-based logging vs continuous live updates
+
+Two separate logging paths exist deliberately: `log_reading` only fires when `fault_class` changes from the previous reading (driven by the ESP32's `s_last_logged_class` comparison, [Section 11](#esp32-gateway)), producing a sparse, human-readable historical log in `Sheet1`. `update_live` fires on a fixed timer regardless of whether the class changed, keeping the dashboard's `Live` tab current. This split exists because logging on every reading (at the STM32's actual inference cadence, roughly once every 160ms) would exceed Google Sheets' practical cell-count and Apps Script's daily quota limits well within a single day of continuous operation, change-based logging keeps `Sheet1` to a meaningful, bounded number of entries corresponding to actual state transitions, not sample-rate noise.
+
+### CORS and uncaught exceptions
+
+Every `doGet` and `doPost` handler is wrapped in try/catch, returning a JSON error object rather than letting an exception escape. This matters because an uncaught exception in Apps Script returns Google's own raw HTML error page, which carries no CORS header. From the dashboard's side, this is indistinguishable from a generic CORS failure, the browser blocks the response before the dashboard's JS ever sees a status code or body to inspect, so what's actually a server-side exception looks identical to a network or CORS misconfiguration. Wrapping every handler ensures a real error still comes back as a valid, CORS-compliant JSON response the dashboard can parse and handle explicitly.
+
+The `get_live`/default-GET error path returns a differently-shaped error (`[['error'], [String(err)]]`, an array of rows) rather than an error object, since the dashboard's front-end code expects an array of rows from these two endpoints specifically, and a shape mismatch on error would just trade a clear error for a confusing parse failure downstream.
