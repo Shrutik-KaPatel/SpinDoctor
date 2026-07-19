@@ -110,7 +110,7 @@ A direct wired UART link (rather than, say, both chips on the same WiFi network 
 
 ### Physical setup and axis mapping
 
-The STM32F407G-DISC1 board is mounted on the fan's rear motor housing via zip ties, behind the blade guard, with a sponge used as a gap-filler so the board wouldn't flex independently against the curved housing surface. This was a deliberate, documented trade-off, not an oversight: a compliant sponge sitting directly in the vibration path between housing and sensor risks attenuating high-frequency content or introducing a spurious resonance. The fix (a rigid epoxy or hot-glue filler instead) was identified and consciously deferred pending a before/after FFT comparison on the healthy fan, rather than redoing the mount on a hunch without evidence it was actually needed.
+The STM32F407G-DISC1 board is mounted on the fan's rear motor housing via zip ties, behind the blade guard. The initial mount used a sponge as a gap-filler between the board and the curved housing surface. This sponge was removed during hardware iteration ([Section 9](#model-training-nanoedge-ai-studio)), alongside a firmware fix for a stack overflow bug, as part of resolving a speed 1 fault detection failure. The board is now direct-mounted against the housing with no compliant material in the vibration path, held only by the zip ties.
 
 <p align="center">
   <img src="Docs/Images/Hardware.png" alt="SpinDoctor hardware mounted on test fan" width="500"/>
@@ -345,3 +345,29 @@ The generated `NanoEdgeAI.h` diffed identically against the previous SVM build e
 ### Current validated state
 
 With the clean recapture, the direct-mounted sensor, and the CNN deployed, fault detection across all three speeds became correct, resolving the speed 1 failure seen with the first SVM. Full class-by-class, speed-by-speed validation is covered in the proof-of-work capture in [Section 14](#proof-of-work).
+## On-Device Inference Integration
+
+### Where InferenceTask sits
+
+`InferenceTask` runs at `osPriorityBelowNormal` with a 1024-word stack, the largest stack of any task in the system, reflecting that SVM/CNN inference math needs meaningfully more working memory than the lightweight bookkeeping done by `AccelTask` or `DHT11Task`. It waits on the same `captureDataReadyHandle` semaphore as `CaptureTask` ([Section 5](#firmware-architecture-stm32-side)), so both tasks are, structurally, competing consumers of the same signal. The `capture_active` flag determines which one is the intended consumer at any given moment: if a training capture session owns the data, `InferenceTask` skips that window and loops back to wait for the next one, rather than running inference on data meant for capture.
+
+When it is the intended consumer, `InferenceTask`:
+1. Reads the completed 64-sample, 3-axis window out of the ping-pong buffer
+2. Runs `neai_classification()` on it
+3. Looks up the winning class using the hardcoded `class_names[]` array ([Section 9](#model-training-nanoedge-ai-studio))
+4. Reads the current temperature from the diagnostics struct under `diagnosticsMutexHandle`
+5. Builds a flat JSON line (`fault_class`, per-class confidence, `temp_c`) and transmits it over USART3 to the ESP32
+
+### The semaphore bug: inference only ran during training
+
+An early version of `InferenceTask` had a bug where the semaphore release feeding it was scoped to only fire during active training captures, meaning the model would run against windows while `CaptureTask` was recording data, but never during genuine standalone operation with no capture session active. This is the same class of `capture_active`-gating issue described in [Section 5](#firmware-architecture-stm32-side): the fix was making the buffer fill and semaphore release unconditional on every sample, so both `CaptureTask` and `InferenceTask` reliably get a continuous stream of windows regardless of which one is the active consumer. Without this fix, the system would have appeared to work correctly during development (because captures were happening) while being non-functional as an actual standalone fault detector.
+
+### configENABLE_FPU
+
+`configENABLE_FPU` in `FreeRTOSConfig.h` was found set to `0`, disabling the Cortex-M4's hardware floating-point unit at the RTOS level even though the underlying silicon supports it. This matters directly for `InferenceTask`: NanoEdge AI's SVM and CNN models both do real floating-point arithmetic per classification, and without `configENABLE_FPU` set to `1`, that math either falls back to slow software floating-point emulation or risks FPU state not being properly saved/restored across context switches, either of which is a real correctness and performance risk for a task expected to run once per completed window. Corrected to `1`.
+
+### Why inference speed matters relative to the sampling rate
+
+The LIS3DSH samples at 400Hz, one sample every 2.5ms, and a full 64-sample window completes roughly every 160ms. The first deployed SVM model's benchmark reported an inference time of ~0.3ms per classification, over two orders of magnitude faster than the time budget available between windows. This headroom is what makes it safe for `InferenceTask` to sit at a lower priority than `AccelTask`, there's no risk of inference itself becoming the bottleneck that causes a missed sample.
+
+The CNN model that replaced the SVM ([Section 9](#model-training-nanoedge-ai-studio)) was not independently benchmarked for its own inference time in the same way, this is a gap worth closing when the NanoEdge Studio screenshots are added, but given the CNN's flash footprint (~2.9KB) is still small and comparable to the SVM's, it's reasonable to expect inference time is in the same low-millisecond range rather than a meaningful fraction of the 160ms window budget. Documented here as an assumption, not a verified number.
