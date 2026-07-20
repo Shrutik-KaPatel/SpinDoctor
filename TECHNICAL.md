@@ -798,4 +798,4 @@ This section is written for a reviewer who wants to reproduce or inspect the sys
 - Live dashboard: https://shrutik-kapatel.github.io/SpinDoctor/
 - Repository: https://github.com/Shrutik-KaPatel/SpinDoctor
 - Portfolio: https://shrutik-kapatel.github.io/
-- LinkedIn: *(will published soon)*
+- LinkedIn: [view post](https://www.linkedin.com/posts/shrutik-kapatel_industrial-equipment-fails-without-warning-ugcPost-7484793969717981184-ou-Z/)
